@@ -36,6 +36,11 @@
           <button id="btn-today" type="button" aria-label="Open today's daily note">Today</button>
           <button id="btn-search" type="button" aria-label="Search the vault">Search</button>
         </div>
+        <div id="ws-actions" class="side-actions" hidden>
+          <button id="ws-new-page" type="button" aria-label="New page">New page</button>
+          <button id="ws-new-db" type="button" aria-label="New database">New database</button>
+        </div>
+        <nav id="ws-tree" class="tree ws-tree" aria-label="Pages" hidden></nav>
         <nav id="tree" class="tree" aria-label="Files"></nav>
         <nav id="tasks-nav" class="tasks-nav" aria-label="Task lists" hidden>
           <ul id="nav-main" class="nav-list"></ul>
@@ -75,10 +80,10 @@
           <div id="editor" class="editor" aria-label="Page editor"></div>
           <p id="empty" class="empty">Open a page from the list, or press Ctrl+O to jump to one.</p>
         </div>
-        <section id="workspace-panel" class="placeholder" aria-labelledby="ws-title" hidden>
-          <h1 id="ws-title">Not built yet</h1>
-          <p class="muted">This mode arrives in a later phase. Your files are untouched and still
-            listed on the left; switch to another mode to keep working with them.</p>
+        <section id="workspace-panel" class="ws-main" aria-label="Workspace" hidden>
+          <div id="ws-page" class="ws-page" hidden></div>
+          <div id="ws-db" class="ws-db" hidden></div>
+          <p id="ws-empty" class="empty">Pick a page on the left, or create one.</p>
         </section>
         <section id="tasks-main" class="tasks-main" aria-label="Tasks" hidden>
           <header class="tasks-head">

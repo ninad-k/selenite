@@ -102,6 +102,112 @@ export interface TaskPatch {
   reminders?: string[];
 }
 
+// ---- Workspace
+export interface RenderedBlock {
+  index: number;
+  kind: string;
+  anchor: string | null;
+  markdown: string;
+  html: string;
+}
+export interface BlockPage {
+  path: string;
+  title: string;
+  revision: string;
+  icon: string | null;
+  cover: string | null;
+  blocks: RenderedBlock[];
+}
+export interface PageNode {
+  name: string;
+  path: string;
+  kind: "page" | "database" | "tasks" | "folder";
+  icon: string | null;
+  children: PageNode[];
+}
+export interface BlockType {
+  kind: string;
+  label: string;
+  hint: string;
+  markdown: string;
+}
+export type BlockEdit =
+  | { op: "replace"; block: string; markdown: string }
+  | { op: "insert"; after: string | null; markdown: string }
+  | { op: "delete"; block: string }
+  | { op: "move"; block: string; to: number }
+  | { op: "toggle_task"; block: string; line: number };
+
+// ---- Databases
+export interface SelectOption {
+  name: string;
+  color?: string;
+}
+/** A property definition as stored in `_schema.yaml` (type-specific keys are flattened). */
+export interface PropertyDef {
+  name: string;
+  type: string;
+  options?: SelectOption[];
+  database?: string;
+  relation?: string;
+  property?: string;
+  function?: string;
+  expression?: string;
+  format?: string;
+}
+export interface FilterRule {
+  property: string;
+  op: string;
+  value?: unknown;
+}
+export interface FilterGroup {
+  op: "and" | "or";
+  rules: FilterRule[];
+}
+export interface SortRule {
+  property: string;
+  descending: boolean;
+}
+export interface ViewQuery {
+  filter?: FilterGroup;
+  sorts?: SortRule[];
+  group_by?: string;
+}
+export interface ViewDef extends ViewQuery {
+  name: string;
+  layout: string;
+  visible?: string[];
+  date_property?: string;
+  end_date_property?: string;
+  cover_property?: string;
+}
+export type CellValue = null | boolean | number | string | CellValue[];
+export interface DbRow {
+  path: string;
+  title: string;
+  values: Record<string, CellValue>;
+}
+export interface ViewResult {
+  folder: string;
+  properties: PropertyDef[];
+  views: ViewDef[];
+  view: ViewDef;
+  rows: DbRow[];
+  groups: { label: string; rows: number[] }[] | null;
+}
+export interface DatabaseInfo {
+  folder: string;
+  kind: string;
+  rows: number;
+}
+export interface DatabaseSchemaJson {
+  kind: string;
+  version: number;
+  properties: PropertyDef[];
+  table_views: ViewDef[];
+  [k: string]: unknown;
+}
+
 /** Thin wrappers over Tauri commands. Errors arrive as plain strings. */
 export const api = {
   appInfo: () => invoke<AppInfo>("app_info"),
@@ -138,6 +244,29 @@ export const api = {
   taskViewSave: (name: string, filter: string, layout: string) =>
     invoke<SavedView[]>("task_view_save", { name, filter, layout }),
   remindersStatus: () => invoke<RemindersStatus>("reminders_status"),
+  blockTypes: () => invoke<BlockType[]>("block_types"),
+  assetUrl: (page: string, target: string) => invoke<string | null>("asset_url", { page, target }),
+  pageBlocks: (path: string) => invoke<BlockPage>("page_blocks", { path }),
+  editBlock: (path: string, edit: BlockEdit, revision: string) =>
+    invoke<{ revision: string }>("edit_block", { path, edit, revision }),
+  workspacePages: () => invoke<PageNode[]>("workspace_pages"),
+  createSubpage: (parent: string | null, title: string) =>
+    invoke<string>("create_subpage", { parent, title }),
+  /** `undefined` keeps a field, an empty string clears it. */
+  setPageMeta: (path: string, icon?: string, cover?: string) =>
+    invoke<{ revision: string }>("set_page_meta", { path, icon: icon ?? null, cover: cover ?? null }),
+  databases: () => invoke<DatabaseInfo[]>("databases"),
+  databaseSchema: (folder: string) => invoke<DatabaseSchemaJson>("database_schema", { folder }),
+  databaseView: (folder: string, view: string | null, query: ViewQuery | null) =>
+    invoke<ViewResult>("database_view", { folder, view, query }),
+  databaseCreate: (folder: string, properties: PropertyDef[]) =>
+    invoke<void>("database_create", { folder, properties }),
+  databaseSchemaSave: (folder: string, schema: DatabaseSchemaJson) =>
+    invoke<void>("database_schema_save", { folder, schema }),
+  rowCreate: (folder: string, title: string, values: Record<string, CellValue>) =>
+    invoke<string>("row_create", { folder, title, values }),
+  rowSet: (path: string, property: string, value: CellValue) =>
+    invoke<void>("row_set", { path, property, value }),
 };
 
 export function errorText(err: unknown): string {
