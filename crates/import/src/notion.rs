@@ -15,6 +15,25 @@ use selenite_index::Engine;
 use selenite_vault::{DatabaseSchema, Document, PropertyValue, SCHEMA_FILE};
 use walkdir::WalkDir;
 
+/// Byte ranges of fenced, indented and inline code, sorted by start.
+fn code_ranges(body: &str) -> Vec<std::ops::Range<usize>> {
+    use pulldown_cmark::{Event, Options, Parser, Tag};
+    let mut out = Vec::new();
+    for (ev, range) in Parser::new_ext(body, Options::empty()).into_offset_iter() {
+        match ev {
+            Event::Start(Tag::CodeBlock(_)) | Event::Code(_) => out.push(range),
+            _ => {}
+        }
+    }
+    out.sort_by_key(|r| r.start);
+    out
+}
+
+fn in_ranges(ranges: &[std::ops::Range<usize>], pos: usize) -> bool {
+    let idx = ranges.partition_point(|r| r.start <= pos);
+    idx > 0 && pos < ranges[idx - 1].end
+}
+
 use crate::sink::Sink;
 use crate::{ImportError, ImportOptions, ImportReport, Result, io_err};
 
@@ -264,6 +283,7 @@ struct LinkCtx {
 
 fn rewrite_links(text: &str, page_orig_dir: &str, page_final: &str, ctx: &LinkCtx) -> String {
     let page_final_dir = parent_of(page_final);
+    let code = code_ranges(text);
     let mut out = String::with_capacity(text.len());
     let mut pos = 0;
     let mut search = 0;
@@ -294,6 +314,9 @@ fn rewrite_links(text: &str, page_orig_dir: &str, page_final: &str, ctx: &LinkCt
             }
         }
         let Some(start) = start else { continue };
+        if in_ranges(&code, close) || in_ranges(&code, start) {
+            continue;
+        }
         let is_image = start > pos && bytes[start - 1] == b'!';
         let link_text = &text[start + 1..close];
         let raw_target = text[after..end].trim();

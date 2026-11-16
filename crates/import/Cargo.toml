@@ -16,6 +16,7 @@ selenite-storage = { workspace = true }
 selenite-index = { workspace = true }
 chrono = { workspace = true }
 csv = { workspace = true }
+pulldown-cmark = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

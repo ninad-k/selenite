@@ -427,3 +427,20 @@ fn todoist_rejects_non_todoist_csv() {
     assert_eq!(r.tasks, 0);
     assert_eq!(r.skipped.len(), 1);
 }
+
+#[test]
+fn notion_links_inside_code_are_left_alone() {
+    let (tmp, mut engine) = vault();
+    let dir = tmp.path().join("exp");
+    let link = format!("[Meeting](Meeting%20Notes%20{ID_B}.md)");
+    let page =
+        format!("# P\n\nReal {link}\n\n```\n{link}\n```\n\nInline `{link}` end\n\n    {link}\n");
+    write(&dir.join(format!("P {ID_A}.md")), page.as_bytes());
+    write(&dir.join(format!("Meeting Notes {ID_B}.md")), b"m\n");
+    let mut o = opts();
+    o.into = Some("N".into());
+    import_notion(&mut engine, &dir, &o).unwrap();
+    let out = read_vault(&engine, "N/P.md");
+    let expected = page.replacen(&format!("Real {link}"), "Real [[Meeting Notes|Meeting]]", 1);
+    assert_eq!(out, expected);
+}
