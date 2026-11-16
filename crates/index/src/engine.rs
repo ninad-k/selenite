@@ -123,6 +123,19 @@ pub fn page_record(path: &VaultPath, text: &str, entry: &Entry, is_task: bool) -
         None
     };
     let body = doc.body();
+    let body_line_offset = u32::try_from(
+        text.get(..doc.body_offset())
+            .map_or(0, |head| head.matches('\n').count()),
+    )
+    .unwrap_or(0);
+    let passages = crate::passages::split_passages(body)
+        .into_iter()
+        .map(|mut p| {
+            p.start_line += body_line_offset;
+            p.end_line += body_line_offset;
+            p
+        })
+        .collect();
     let lines: Vec<&str> = body.lines().collect();
     // Wikilinks inside front matter values (relations, task parents) count as links too;
     // they are recorded on line 0.
@@ -179,6 +192,7 @@ pub fn page_record(path: &VaultPath, text: &str, entry: &Entry, is_task: bool) -
         links,
         properties,
         task,
+        passages,
     }
 }
 

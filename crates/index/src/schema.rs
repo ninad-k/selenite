@@ -1,5 +1,9 @@
 //! SQLite schema for the index. Bump [`crate::INDEX_VERSION`] with every change.
 
+/// Rowids of the `passages` table are `page_id * PASSAGE_ROWID_STRIDE + n`; a page has fewer
+/// passages than this.
+pub(crate) const PASSAGE_ROWID_STRIDE: i64 = 100_000;
+
 /// Full schema, applied to an empty database.
 pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE pages (
@@ -72,6 +76,17 @@ CREATE INDEX tasks_due ON tasks(done, due);
 CREATE VIRTUAL TABLE fts USING fts5(
     title,
     body,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+
+-- One row per citable passage. rowid = page_id * PASSAGE_ROWID_STRIDE + sequence number, so a
+-- page's passages are removed with a rowid range delete instead of a table scan.
+CREATE VIRTUAL TABLE passages USING fts5(
+    page_id UNINDEXED,
+    heading,
+    text,
+    start_line UNINDEXED,
+    end_line UNINDEXED,
     tokenize = 'unicode61 remove_diacritics 2'
 );
 "#;

@@ -1,0 +1,24 @@
+[package]
+name = "selenite-plugins"
+description = "Plugin API v1: manifests, enablement, and the permission-checked host that serves plugin calls."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+selenite-core = { workspace = true }
+selenite-vault = { workspace = true }
+selenite-storage = { workspace = true }
+selenite-index = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -9,8 +9,10 @@ use chrono::{NaiveDate, NaiveDateTime};
 use selenite_core::database::{PropertyDef, ViewQuery};
 use selenite_core::{Due, Mode, PathError, Priority, ReminderSpec, TaskFields, VaultPath};
 use selenite_index::{
-    Agenda, BlockEdit, BlockPage, DatabaseInfo, Engine, EngineError, TaskItem, TreeNode, ViewResult,
+    Agenda, BlockEdit, BlockPage, Citation, DatabaseInfo, Engine, EngineError, TaskItem, TreeNode,
+    ViewResult,
 };
+use selenite_plugins::{Permission, PluginError, PluginInfo};
 use selenite_reminders::PlannerInput;
 use selenite_storage::{Revision, StorageError};
 use selenite_vault::{DatabaseSchema, Document, PropertyValue, SavedView};
@@ -52,6 +54,9 @@ pub enum CmdError {
     /// A cloud remote or sync request failed.
     #[error("{0}")]
     Remote(String),
+    /// A plugin request failed.
+    #[error("{0}")]
+    Plugin(String),
 }
 
 impl From<EngineError> for CmdError {
@@ -381,6 +386,91 @@ pub fn search(state: &AppState, query: &str, limit: usize) -> Result<Vec<SearchH
                 snippet: h.snippet,
             })
             .collect())
+    })
+}
+
+/// Passages that answer `question`, with citations. Retrieval only: no model is called.
+///
+/// # Errors
+///
+/// Fails when no vault is open or the index fails.
+pub fn ask(state: &AppState, question: &str, limit: usize) -> Result<Vec<Citation>, CmdError> {
+    state.with_engine(|e| Ok(e.ask(question, limit.clamp(1, 25))?))
+}
+
+/// What the UI needs to start a plugin in its sandbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PluginSource {
+    /// Plugin id.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// The plugin script (only returned for an enabled, unchanged plugin).
+    pub source: String,
+    /// Granted permissions.
+    pub permissions: Vec<Permission>,
+}
+
+impl From<PluginError> for CmdError {
+    fn from(e: PluginError) -> Self {
+        Self::Plugin(e.to_string())
+    }
+}
+
+/// Plugins found in the open vault and whether each is enabled.
+///
+/// # Errors
+///
+/// Fails when no vault is open or storage cannot be listed.
+pub fn plugin_list(state: &AppState) -> Result<Vec<PluginInfo>, CmdError> {
+    state.with_engine(|e| Ok(selenite_plugins::discover(e)?))
+}
+
+/// Enable or disable a plugin. Only the UI's own confirm flow calls this; there is no plugin
+/// method that reaches it.
+///
+/// # Errors
+///
+/// Fails when no vault is open, or the plugin is missing or invalid.
+pub fn plugin_set_enabled(state: &AppState, id: &str, enabled: bool) -> Result<(), CmdError> {
+    state.with_engine(|e| Ok(selenite_plugins::set_enabled(e, id, enabled)?))
+}
+
+/// The script of an enabled plugin, for the sandboxed iframe.
+///
+/// # Errors
+///
+/// Fails when the plugin is not enabled, changed since it was enabled, or is invalid.
+pub fn plugin_load(state: &AppState, id: &str) -> Result<PluginSource, CmdError> {
+    state.with_engine(|e| {
+        let p = selenite_plugins::load_enabled(e, id)?;
+        Ok(PluginSource {
+            id: p.manifest.id,
+            name: p.manifest.name,
+            source: p.source,
+            permissions: p.manifest.permissions,
+        })
+    })
+}
+
+/// Serve one call from a sandboxed plugin. `plugin_id` is chosen by the UI from the iframe the
+/// message came from; permissions, rate limits and auditing are enforced here.
+///
+/// # Errors
+///
+/// Fails when no vault is open or the host refuses or fails the call.
+pub fn plugin_call(
+    state: &AppState,
+    plugin_id: &str,
+    method: &str,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, CmdError> {
+    state.with_engine(|e| {
+        let mut host = state
+            .plugins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(host.call(e, plugin_id, method, args)?)
     })
 }
 
@@ -1013,6 +1103,56 @@ pub const ASSET_BASE: &str = if cfg!(windows) {
 } else {
     "vault://localhost/"
 };
+
+/// Base URL of the `plugin` URI scheme that serves sandboxed plugin frames.
+pub const PLUGIN_BASE: &str = if cfg!(windows) {
+    "http://plugin.localhost/"
+} else {
+    "plugin://localhost/"
+};
+
+/// The script that defines the `selenite` global inside a plugin frame.
+const PLUGIN_BOOTSTRAP: &str = include_str!("plugin_bootstrap.js");
+
+/// Keep text from ending its `<script>` element or opening an HTML comment.
+fn script_safe(js: &str) -> String {
+    let mut out = String::with_capacity(js.len());
+    let lower = js.to_ascii_lowercase();
+    let b = js.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if lower[i..].starts_with("</script") {
+            out.push_str(r"<\/");
+            i += 2;
+        } else if js[i..].starts_with("<!--") {
+            out.push_str(r"<\!--");
+            i += 4;
+        } else {
+            let ch = js[i..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// Build the HTML document of an enabled, unchanged plugin for the `plugin` scheme.
+/// `request_path` is `/<plugin-id>/`; anything else (or a plugin that is disabled, changed or
+/// invalid) yields `None`, which the scheme handler turns into a 404.
+pub fn plugin_frame(state: &AppState, request_path: &str) -> Option<String> {
+    let id = request_path
+        .strip_prefix('/')
+        .and_then(|p| p.strip_suffix('/'))
+        .filter(|id| selenite_plugins::is_valid_id(id))?;
+    let loaded = state
+        .with_engine(|e| Ok(selenite_plugins::load_enabled(e, id)?))
+        .ok()?;
+    Some(format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"></head><body><script>{}</script><script>{}</script></body></html>",
+        script_safe(PLUGIN_BOOTSTRAP),
+        script_safe(&loaded.source)
+    ))
+}
 
 /// One node of the Workspace page tree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2551,5 +2691,135 @@ mod tests {
         assert_eq!(status.kind, "failing");
         assert!(status.last_error.as_deref().unwrap().contains("denied"));
         refresh(&state).unwrap();
+    }
+
+    // ---- ask and plugins
+
+    fn put_plugin(state: &AppState, id: &str, perms: &str) {
+        let engine_path = |rel: &str| selenite_core::VaultPath::new(rel).unwrap();
+        state
+            .with_engine(|e| {
+                let manifest =
+                    format!(r#"{{"id":"{id}","name":"T","version":"1","permissions":[{perms}]}}"#);
+                e.storage()
+                    .write(
+                        &engine_path(&format!(".selenite/plugins/{id}/manifest.json")),
+                        manifest.as_bytes(),
+                        selenite_storage::WriteMode::Overwrite,
+                    )
+                    .unwrap();
+                e.storage()
+                    .write(
+                        &engine_path(&format!(".selenite/plugins/{id}/main.js")),
+                        b"// plugin",
+                        selenite_storage::WriteMode::Overwrite,
+                    )
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn plugin_frames_are_only_served_for_enabled_unchanged_plugins() {
+        let (_d, state) = fixture();
+        put_plugin(&state, "reader", r#""read""#);
+        // Disabled, malformed and unknown requests are all refused.
+        assert!(plugin_frame(&state, "/reader/").is_none());
+        plugin_set_enabled(&state, "reader", true).unwrap();
+        for bad in [
+            "",
+            "/",
+            "/reader",
+            "reader/",
+            "/../reader/",
+            "/reader/x",
+            "//",
+            "/nope/",
+        ] {
+            assert!(plugin_frame(&state, bad).is_none(), "{bad}");
+        }
+        let html = plugin_frame(&state, "/reader/").unwrap();
+        assert!(html.contains("// plugin") && html.contains("selenite"));
+        assert!(!html.contains("srcdoc"));
+        // A changed file no longer matches its enabled hash.
+        state
+            .with_engine(|e| {
+                e.storage()
+                    .write(
+                        &selenite_core::VaultPath::new(".selenite/plugins/reader/main.js").unwrap(),
+                        b"// changed",
+                        selenite_storage::WriteMode::Overwrite,
+                    )
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert!(plugin_frame(&state, "/reader/").is_none());
+    }
+
+    #[test]
+    fn script_safe_neutralises_script_end_and_comment_openers() {
+        let out = script_safe("a</SCRIPT>b<!--c é");
+        assert!(!out.to_ascii_lowercase().contains("</script"));
+        assert!(!out.contains("<!--"));
+        assert!(out.ends_with("é"));
+    }
+
+    #[test]
+    fn ask_returns_citations_for_the_open_vault() {
+        let (_d, state) = fixture();
+        create_page(&state, "Berlin", None).unwrap();
+        state
+            .with_engine(|e| {
+                let p = selenite_core::VaultPath::new("Berlin.md").unwrap();
+                let (_, rev) = e.read_page(&p)?;
+                e.save_page(
+                    &p,
+                    "# Berlin
+
+Checkout at the hotel is at noon.
+",
+                    Some(rev),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let cites = ask(&state, "When is hotel checkout?", 5).unwrap();
+        assert_eq!(cites[0].path, "Berlin.md");
+        assert_eq!((cites[0].start_line, cites[0].end_line), (3, 3));
+        let empty = AppState::new(std::path::PathBuf::from("unused.json"));
+        assert!(matches!(ask(&empty, "x", 3), Err(CmdError::NoVault)));
+    }
+
+    #[test]
+    fn plugin_calls_are_permission_checked_and_audited() {
+        let (_d, state) = fixture();
+        put_plugin(&state, "reader", r#""read""#);
+        assert!(!plugin_list(&state).unwrap()[0].enabled);
+        let args = serde_json::json!({"title": "Nope", "markdown": "x"});
+        // Disabled: nothing runs and no source is handed out.
+        assert!(plugin_load(&state, "reader").is_err());
+        assert!(plugin_call(&state, "reader", "vault.createPage", &args).is_err());
+
+        plugin_set_enabled(&state, "reader", true).unwrap();
+        assert_eq!(plugin_load(&state, "reader").unwrap().source, "// plugin");
+        let err = plugin_call(&state, "reader", "vault.createPage", &args).unwrap_err();
+        assert!(err.to_string().contains("`write` permission"), "{err}");
+        assert!(resolve(&state, "Nope").unwrap().is_none());
+
+        put_plugin(&state, "writer", r#""write""#);
+        plugin_set_enabled(&state, "writer", true).unwrap();
+        plugin_call(&state, "writer", "vault.createPage", &args).unwrap();
+        assert!(resolve(&state, "Nope").unwrap().is_some());
+        let log = state
+            .with_engine(|e| {
+                Ok(selenite_index::audit::AuditLog::new()
+                    .entries(e, 10)
+                    .unwrap())
+            })
+            .unwrap();
+        let transports: Vec<_> = log.iter().map(|a| a.transport.clone().unwrap()).collect();
+        assert_eq!(transports, vec!["plugin:reader", "plugin:writer"]);
     }
 }

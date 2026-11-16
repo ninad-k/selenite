@@ -4,13 +4,14 @@
 pub mod commands;
 pub mod state;
 
-use selenite_index::{BlockPage, DatabaseInfo, TreeNode, ViewResult};
+use selenite_index::{BlockPage, Citation, DatabaseInfo, TreeNode, ViewResult};
+use selenite_plugins::PluginInfo;
 use tauri::{Emitter, Manager, State};
 
 use commands::{
     AgendaDto, AppInfo, AutoSync, BacklinkDto, BlockTypeDto, CmdError, OutLinkDto, PageContent,
-    PageNode, ProjectDto, QuickAddResult, RemoteDto, SaveResult, SearchHitDto, SyncStatusDto,
-    TagDto, TaskDetail, TaskDto, VaultInfo, ViewDto,
+    PageNode, PluginSource, ProjectDto, QuickAddResult, RemoteDto, SaveResult, SearchHitDto,
+    SyncStatusDto, TagDto, TaskDetail, TaskDto, VaultInfo, ViewDto,
 };
 use state::{AppState, RemindersStatus, SyncSummary};
 
@@ -95,6 +96,40 @@ fn search(
     limit: usize,
 ) -> Result<Vec<SearchHitDto>, String> {
     s(commands::search(&state, &query, limit))
+}
+
+#[tauri::command]
+fn ask(
+    state: State<'_, AppState>,
+    question: String,
+    limit: usize,
+) -> Result<Vec<Citation>, String> {
+    s(commands::ask(&state, &question, limit))
+}
+
+#[tauri::command]
+fn plugin_list(state: State<'_, AppState>) -> Result<Vec<PluginInfo>, String> {
+    s(commands::plugin_list(&state))
+}
+
+#[tauri::command]
+fn plugin_set_enabled(state: State<'_, AppState>, id: String, enabled: bool) -> Result<(), String> {
+    s(commands::plugin_set_enabled(&state, &id, enabled))
+}
+
+#[tauri::command]
+fn plugin_load(state: State<'_, AppState>, id: String) -> Result<PluginSource, String> {
+    s(commands::plugin_load(&state, &id))
+}
+
+#[tauri::command]
+fn plugin_call(
+    state: State<'_, AppState>,
+    plugin_id: String,
+    method: String,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    s(commands::plugin_call(&state, &plugin_id, &method, &args))
 }
 
 #[tauri::command]
@@ -204,6 +239,11 @@ fn reminders_status(state: State<'_, AppState>) -> RemindersStatus {
 #[tauri::command]
 fn block_types() -> Vec<BlockTypeDto> {
     commands::block_types()
+}
+
+#[tauri::command]
+fn plugin_base() -> &'static str {
+    commands::PLUGIN_BASE
 }
 
 #[tauri::command]
@@ -428,6 +468,33 @@ fn asset_response(app: &tauri::AppHandle, request_path: &str) -> tauri::http::Re
     result.unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
 }
 
+/// Response headers for plugin frames: nothing may load or connect, and no other origin may embed
+/// the document as a subresource.
+const PLUGIN_FRAME_CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; form-action 'none'; base-uri 'none'; navigate-to 'none'";
+
+fn plugin_frame_response(
+    app: &tauri::AppHandle,
+    request_path: &str,
+) -> tauri::http::Response<Vec<u8>> {
+    let state = app.state::<AppState>();
+    let result = match commands::plugin_frame(&state, request_path) {
+        Some(html) => tauri::http::Response::builder()
+            .status(200)
+            .header("Content-Type", "text/html; charset=utf-8")
+            .header("Content-Security-Policy", PLUGIN_FRAME_CSP)
+            .header("Cross-Origin-Resource-Policy", "same-origin")
+            .header("X-Content-Type-Options", "nosniff")
+            .header("Cache-Control", "no-store")
+            .body(html.into_bytes()),
+        None => tauri::http::Response::builder()
+            .status(404)
+            .header("Content-Security-Policy", PLUGIN_FRAME_CSP)
+            .header("Cache-Control", "no-store")
+            .body(Vec::new()),
+    };
+    result.unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
+}
+
 /// Start the desktop application and block until the window closes.
 ///
 /// # Errors
@@ -441,6 +508,9 @@ pub fn run() -> Result<(), tauri::Error> {
     tauri::Builder::default()
         .register_uri_scheme_protocol("vault", |ctx, request| {
             asset_response(ctx.app_handle(), request.uri().path())
+        })
+        .register_uri_scheme_protocol("plugin", |ctx, request| {
+            plugin_frame_response(ctx.app_handle(), request.uri().path())
         })
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
@@ -465,6 +535,12 @@ pub fn run() -> Result<(), tauri::Error> {
             create_page_at,
             resolve,
             search,
+            ask,
+            plugin_list,
+            plugin_set_enabled,
+            plugin_load,
+            plugin_base,
+            plugin_call,
             backlinks,
             outgoing,
             tags,
