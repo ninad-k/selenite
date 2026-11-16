@@ -78,6 +78,10 @@ atomic and fails with `Conflict` if `expected_revision` no longer matches; sync 
 into conflict copies instead of overwriting. There is no hard delete in the trait: `trash` moves
 files to `.selenite/trash/`.
 
+`LocalFolder` revisions are the file's modification time plus its size. So that two quick saves
+of equal length cannot share a revision (same clock tick, or a clock that stepped back), every
+write leaves the file with a modification time strictly later than the one it replaced.
+
 ## Index lifecycle
 
 - Opened with `INDEX_VERSION` stored in `PRAGMA user_version`. Mismatch => drop and rebuild.
@@ -108,3 +112,9 @@ files to `.selenite/trash/`.
   `.selenite/sync/queue.json`. The index and sync state are never synced.
 - Known limit: Google Drive has no conditional writes, so a Replace is check-then-write with a
   window of about one round trip; OneDrive uses `If-Match`.
+
+## Mobile (Android)
+
+The same Tauri shell builds for Android (`apps/desktop/src-tauri/gen/android`, see `docs/mobile.md`).
+Mobile builds enter through `mobile_main`, schedule reminders with `tauri-plugin-notification`
+(`MobileNotifier`), and suggest a vault inside the app's own data folder. iOS needs a Mac.
