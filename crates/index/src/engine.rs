@@ -44,6 +44,9 @@ pub enum EngineError {
     /// The file is not valid UTF-8 text.
     #[error("not UTF-8 text: {0}")]
     NotUtf8(VaultPath),
+    /// A database operation failed.
+    #[error("database error: {0}")]
+    Database(String),
     /// A task operation failed.
     #[error("task error: {0}")]
     Task(String),
@@ -121,6 +124,25 @@ pub fn page_record(path: &VaultPath, text: &str, entry: &Entry, is_task: bool) -
     };
     let body = doc.body();
     let lines: Vec<&str> = body.lines().collect();
+    // Wikilinks inside front matter values (relations, task parents) count as links too;
+    // they are recorded on line 0.
+    let mut fm_links = Vec::new();
+    for (key, value) in doc.front_matter().iter() {
+        let mut texts = Vec::new();
+        collect_texts(value, &mut texts);
+        for t in texts {
+            for l in extract_links(&t) {
+                fm_links.push(LinkRecord {
+                    target: l.target,
+                    heading: l.heading,
+                    alias: l.alias,
+                    embed: l.embed,
+                    line: 0,
+                    context: truncate(&format!("{key}: {t}"), 240),
+                });
+            }
+        }
+    }
     let links = extract_links(body)
         .into_iter()
         .map(|l| {
@@ -137,6 +159,7 @@ pub fn page_record(path: &VaultPath, text: &str, entry: &Entry, is_task: bool) -
                 context,
             }
         })
+        .chain(fm_links)
         .collect();
     let properties = doc
         .front_matter()
@@ -156,6 +179,16 @@ pub fn page_record(path: &VaultPath, text: &str, entry: &Entry, is_task: bool) -
         links,
         properties,
         task,
+    }
+}
+
+fn collect_texts(v: &selenite_vault::PropertyValue, out: &mut Vec<String>) {
+    use selenite_vault::PropertyValue as P;
+    match v {
+        P::Text(t) if t.contains("[[") => out.push(t.clone()),
+        P::List(items) => items.iter().for_each(|i| collect_texts(i, out)),
+        P::Map(entries) => entries.iter().for_each(|(_, i)| collect_texts(i, out)),
+        _ => {}
     }
 }
 

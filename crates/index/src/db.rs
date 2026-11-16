@@ -506,6 +506,45 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Pages directly inside `folder` (not nested deeper) with their front matter properties
+    /// as `(key, JSON value)`, ordered by path. `folder` is vault-relative; empty for the root.
+    pub fn folder_rows(&self, folder: &str) -> Result<Vec<(PageSummary, Vec<(String, String)>)>> {
+        let prefix = if folder.is_empty() {
+            String::new()
+        } else {
+            format!("{folder}/")
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id, p.path, p.title, p.modified_ms FROM pages p
+             WHERE substr(p.path, 1, length(?1)) = ?1
+               AND instr(substr(p.path, length(?1) + 1), '/') = 0
+             ORDER BY p.path",
+        )?;
+        let pages: Vec<(i64, PageSummary)> = stmt
+            .query_map([&prefix], |r| {
+                Ok((
+                    r.get(0)?,
+                    PageSummary {
+                        path: to_path(r.get(1)?)?,
+                        title: r.get(2)?,
+                        modified_ms: r.get(3)?,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut props = self.conn.prepare_cached(
+            "SELECT key, value_json FROM properties WHERE page_id = ?1 ORDER BY rowid",
+        )?;
+        let mut out = Vec::with_capacity(pages.len());
+        for (id, summary) in pages {
+            let kv: Vec<(String, String)> = props
+                .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            out.push((summary, kv));
+        }
+        Ok(out)
+    }
+
     /// Read a value from the index metadata table.
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
         Ok(self
