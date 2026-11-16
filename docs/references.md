@@ -1,0 +1,13 @@
+# References
+
+The clean-room rule: we match reference apps by behaviour and capability only, and never copy their source, assets, icons, wording, trademarks or pixel layouts. We study only public documentation and permissively licensed open source, and every reference is recorded in this table before work starts (ADR-008).
+
+| Date | Source (URL) | What was studied | Licence / terms | Used for |
+|---|---|---|---|---|
+| 2026-11-16 | Obsidian public help docs, https://help.obsidian.md | Public help pages on internal links and front matter | Public help documentation; check site terms | File-format compatibility only |
+| 2026-11-16 | CommonMark spec, https://spec.commonmark.org | Markdown syntax rules | CC-BY-SA | Parsing and rendering Markdown files |
+| 2026-11-16 | YAML 1.2 spec, https://yaml.org/spec/1.2.2/ | YAML syntax and typing for front matter and `_schema.yaml` | Open specification | Front matter parsing |
+| 2026-11-16 | RFC 5545 iCalendar, https://www.rfc-editor.org/rfc/rfc5545 | RRULE recurrence rules | IETF document, standard terms | Recurring task dates |
+| 2026-11-16 | SQLite FTS5 docs, https://www.sqlite.org/fts5.html | Full-text index syntax and behaviour | Public domain | Index and full-text search |
+| 2026-11-16 | Tauri 2 docs, https://v2.tauri.app | App shell, bundling and OS integration APIs | Public documentation; check project licence | Desktop shell |
+| 2026-11-16 | Model Context Protocol spec, https://modelcontextprotocol.io | MCP transports and tool model | Open specification; check repository licence | MCP server (ADR-007) |
