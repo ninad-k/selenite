@@ -9,12 +9,16 @@ use std::process::ExitCode;
 
 use anyhow::{Result, bail};
 use chrono::{Duration, NaiveDate, NaiveDateTime};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use selenite_core::{APP_NAME, Due, Priority, TaskFields, VaultPath};
 use selenite_index::{Engine, HIGHLIGHT_END, HIGHLIGHT_START, TaskItem};
 use selenite_reminders::{PlannerInput, WINDOW_DAYS, plan};
+use selenite_storage::oauth::default_open_browser;
+use selenite_sync::{Provider, RemoteConfig, client_config, keychain_store};
 use selenite_vault::{SavedView, layout};
 use serde::Serialize;
+
+mod remotes;
 
 #[derive(Parser)]
 #[command(
@@ -86,8 +90,17 @@ enum Command {
     RebuildIndex,
     /// Serve the vault to AI agents over MCP (stdio). Logs go to stderr.
     Mcp,
-    /// Sync with other devices (not available yet).
-    Sync,
+    /// Sync the vault with its cloud remotes (exit 0 ok, 1 error, 3 offline).
+    Sync {
+        /// Only this remote (default: all). See `remote list`.
+        #[arg(long, value_name = "ID")]
+        remote: Option<String>,
+    },
+    /// Manage cloud remotes (Google Drive, OneDrive).
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCommand,
+    },
     /// Import notes from another app (not available yet).
     Import {
         /// Source app name.
@@ -158,6 +171,42 @@ enum TaskCommand {
         /// Filter expression.
         #[arg(required = true, allow_hyphen_values = true, value_name = "FILTER")]
         filter: Vec<String>,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ProviderArg {
+    #[value(name = "google-drive")]
+    GoogleDrive,
+    #[value(name = "onedrive")]
+    Onedrive,
+}
+
+impl From<ProviderArg> for Provider {
+    fn from(p: ProviderArg) -> Self {
+        match p {
+            ProviderArg::GoogleDrive => Provider::GoogleDrive,
+            ProviderArg::Onedrive => Provider::OneDrive,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum RemoteCommand {
+    /// Sign in to a provider in your browser and add it as a remote.
+    Add {
+        /// Cloud provider.
+        provider: ProviderArg,
+        /// Remote folder name (default: the vault folder's name). OneDrive uses its app folder.
+        #[arg(long)]
+        folder: Option<String>,
+    },
+    /// List configured remotes.
+    List,
+    /// Remove a remote and its stored sign-in. Files in the cloud are never deleted.
+    Remove {
+        /// Remote id, e.g. gdrive-1.
+        id: String,
     },
 }
 
@@ -260,7 +309,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
         json,
         command,
     } = cli;
-    let open = || Engine::open_local(&vault.clone().unwrap_or_else(|| PathBuf::from(".")));
+    let vault_root = || vault.clone().unwrap_or_else(|| PathBuf::from("."));
+    let open = || Engine::open_local(&vault_root());
     match command {
         Command::Init { path } => {
             if vault.is_some() {
@@ -392,9 +442,41 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let engine = open()?;
             selenite_mcp::run_stdio(engine)?;
         }
-        Command::Sync => {
-            eprintln!("error: {APP_NAME} sync is not available until a later phase");
-            return Ok(ExitCode::from(2));
+        Command::Sync { remote } => {
+            let open_remote =
+                |r: &RemoteConfig| selenite_sync::open_remote(r, keychain_store(r.provider, &r.id));
+            let code = remotes::sync_cmd(
+                &vault_root(),
+                remote.as_deref(),
+                json,
+                &open_remote,
+                &mut std::io::stdout(),
+            )?;
+            return Ok(ExitCode::from(code));
+        }
+        Command::Remote { command } => {
+            let root = vault_root();
+            let store_for = |p: Provider, id: &str| keychain_store(p, id);
+            let mut out = std::io::stdout();
+            match command {
+                RemoteCommand::Add { provider, folder } => {
+                    let provider = Provider::from(provider);
+                    remotes::remote_add(
+                        &root,
+                        provider,
+                        folder,
+                        client_config(provider),
+                        &store_for,
+                        &default_open_browser,
+                        json,
+                        &mut out,
+                    )?;
+                }
+                RemoteCommand::List => remotes::remote_list(&root, json, &mut out)?,
+                RemoteCommand::Remove { id } => {
+                    remotes::remote_remove(&root, &id, &store_for, json, &mut out)?;
+                }
+            }
         }
         Command::Import { .. } => {
             eprintln!("error: {APP_NAME} import is not available until a later phase");
