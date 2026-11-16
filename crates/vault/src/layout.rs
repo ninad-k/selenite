@@ -61,7 +61,7 @@ pub fn welcome_text(app_name: &str) -> String {
 Your notes are plain Markdown files in this folder, so they stay yours.\n\n\
 - Link pages with double square brackets, for example `[[Another page]]`.\n\
 - Open today's daily note to jot things down; daily notes live in the Daily folder.\n\
-- Add #tags anywhere in a note, and nest them like #project/ideas.\n\n\
+- Add tags anywhere in a note, like `#idea`, and nest them like `#project/ideas`.\n\n\
 Delete or rewrite this note whenever you like.\n"
     )
 }
@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn welcome_and_markers() {
         let w = welcome_text("Selenite");
-        assert!(w.contains("Selenite") && w.contains("[[Another page]]") && w.contains("#tags"));
+        assert!(w.contains("Selenite") && w.contains("[[Another page]]") && w.contains("`#idea`"));
         assert_eq!(WELCOME_PAGE, "Welcome.md");
         assert_eq!(obsidian_marker_files()[0].0, ".obsidian/app.json");
     }

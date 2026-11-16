@@ -265,3 +265,12 @@ fn search_10k_under_budget_in_release() {
         assert!(ms < 100.0, "{q} took {ms:.1} ms");
     }
 }
+
+#[test]
+fn fresh_vault_has_no_links_or_tags_from_the_welcome_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = Engine::init_local(dir.path()).unwrap();
+    assert!(e.index().unresolved().unwrap().is_empty());
+    let tags: Vec<String> = e.tags().unwrap().into_iter().map(|t| t.tag).collect();
+    assert_eq!(tags, vec!["welcome"]);
+}
