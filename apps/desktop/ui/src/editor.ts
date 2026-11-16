@@ -3,7 +3,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import { syntaxTree } from "@codemirror/language";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
-import { EditorState, Range } from "@codemirror/state";
+import { EditorState, Prec, Range } from "@codemirror/state";
 import {
   Decoration,
   type DecorationSet,
@@ -197,5 +197,110 @@ export function createEditor(parent: HTMLElement, cb: EditorCallbacks): EditorHa
     setText: (text) => view.setState(makeState(text)),
     getText: () => view.state.doc.toString(),
     focus: () => view.focus(),
+  };
+}
+
+// ---------------------------------------------------------------- block editor (Workspace)
+
+export type SlashKey = "ArrowDown" | "ArrowUp" | "Enter" | "Escape";
+
+export interface BlockEditorOptions {
+  doc: string;
+  onChange: (text: string) => void;
+  onBlur: () => void;
+  onEscape: () => void;
+  onCtrlEnter: () => void;
+  onBackspaceEmpty: () => void;
+  /** Offer a key to the slash menu; return true when it consumed the key. */
+  slashKey: (key: SlashKey) => boolean;
+}
+
+export interface BlockEditorHandle {
+  getText: () => string;
+  setText: (text: string) => void;
+  focus: (pos?: number) => void;
+  destroy: () => void;
+}
+
+const blockTheme = EditorView.theme({
+  "&": { color: "var(--text)", backgroundColor: "transparent", fontSize: "inherit" },
+  "&.cm-focused": { outline: "none" },
+  ".cm-scroller": { fontFamily: "var(--font-editor)", lineHeight: "1.6", overflow: "visible" },
+  ".cm-content": { caretColor: "var(--accent)", padding: "2px 0" },
+  ".cm-cursor": { borderLeftColor: "var(--accent)" },
+  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": {
+    backgroundColor: "var(--selection)",
+  },
+  ".cm-activeLine": { backgroundColor: "transparent" },
+});
+
+/** A compact Markdown editor for a single block. */
+export function createBlockEditor(parent: HTMLElement, o: BlockEditorOptions): BlockEditorHandle {
+  const slash = (key: SlashKey) => () => {
+    if (o.slashKey(key)) return true;
+    if (key === "Escape") {
+      o.onEscape();
+      return true;
+    }
+    return false;
+  };
+  const state = EditorState.create({
+    doc: o.doc,
+    extensions: [
+      history(),
+      closeBrackets(),
+      markdown(),
+      EditorView.lineWrapping,
+      EditorView.contentAttributes.of({ "aria-label": "Block text", spellcheck: "true" }),
+      Prec.highest(
+        keymap.of([
+          { key: "ArrowDown", run: slash("ArrowDown") },
+          { key: "ArrowUp", run: slash("ArrowUp") },
+          { key: "Enter", run: slash("Enter") },
+          { key: "Escape", run: slash("Escape") },
+          {
+            key: "Mod-Enter",
+            run: () => {
+              o.onCtrlEnter();
+              return true;
+            },
+          },
+          {
+            key: "Backspace",
+            run: (v) => {
+              if (v.state.doc.length === 0) {
+                o.onBackspaceEmpty();
+                return true;
+              }
+              return false;
+            },
+          },
+        ]),
+      ),
+      keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap, indentWithTab]),
+      matchPlugin(wikilinkMatcher),
+      matchPlugin(tagMatcher),
+      markdownStyle,
+      blockTheme,
+      EditorView.updateListener.of((u) => {
+        if (u.docChanged) o.onChange(u.state.doc.toString());
+      }),
+      EditorView.domEventHandlers({ blur: () => (o.onBlur(), false) }),
+    ],
+  });
+  const view = new EditorView({ state, parent });
+  return {
+    getText: () => view.state.doc.toString(),
+    setText: (text) =>
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: text },
+        selection: { anchor: text.length },
+      }),
+    focus: (pos) => {
+      view.focus();
+      const at = Math.min(pos ?? view.state.doc.length, view.state.doc.length);
+      view.dispatch({ selection: { anchor: at } });
+    },
+    destroy: () => view.destroy(),
   };
 }

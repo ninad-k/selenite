@@ -1,6 +1,8 @@
 import "./styles.css";
+import "./workspace.css";
 import { api, errorText, type TreeNode, type VaultInfo } from "./api";
 import { createEditor, type EditorHandle } from "./editor";
+import { enterWorkspace, initWorkspace, leaveWorkspace, reloadWorkspace } from "./workspace";
 import { enterTasks, initTasks, leaveTasks, refreshReminders, reloadTasks } from "./tasks";
 
 const HL_START = "";
@@ -541,15 +543,19 @@ function applyMode(info: VaultInfo): void {
   renderModeSwitch(info);
   $("vault-main").hidden = !vault;
   $("workspace-panel").hidden = !workspace;
+  $("ws-actions").hidden = !workspace;
+  $("ws-tree").hidden = !workspace;
   $("tasks-main").hidden = !tasks;
   $("links-panel").hidden = !vault;
   $("drawer").hidden = !tasks;
-  $("vault-actions").hidden = tasks;
-  $("tree").hidden = tasks;
-  $("tags-section").hidden = tasks;
+  $("vault-actions").hidden = tasks || workspace;
+  $("tree").hidden = tasks || workspace;
+  $("tags-section").hidden = tasks || workspace;
   $("tasks-nav").hidden = !tasks;
   $("status-path").hidden = !vault;
   $("status-state").hidden = !vault;
+  if (workspace) void enterWorkspace();
+  else leaveWorkspace();
   if (tasks) void enterTasks();
   else {
     leaveTasks();
@@ -604,6 +610,7 @@ async function onWindowFocus(): Promise<void> {
   try {
     await api.refresh();
     await Promise.all([refreshTree(), refreshTags(), refreshLinks()]);
+    if (app.vault.mode_id === "workspace") await reloadWorkspace();
     if (app.vault.mode_id === "tasks") await reloadTasks();
     else await refreshReminders();
     // Pick up outside edits when nothing of ours is pending.
@@ -692,6 +699,11 @@ async function init(): Promise<void> {
   });
   $("banner-close").addEventListener("click", hideBanner);
   initTasks({ openAsPage: (path) => void loadPage(path) });
+  initWorkspace({
+    banner: showBanner,
+    openTasks: () => void switchMode("tasks"),
+    flush: flushSave,
+  });
   wireDialog();
   wireTabs();
   wireShortcuts();

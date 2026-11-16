@@ -400,25 +400,304 @@ async fn query_database_runs_task_filters_and_rejects_table_folders() {
     let all = ok(s
         .query_database(Parameters(QueryDatabaseParams {
             folder: None,
-            filter: "p1".into(),
+            filter: Some("p1".into()),
+            view: None,
+            query: None,
         }))
         .await);
     assert_eq!(all["total"], 1);
     let in_tasks = ok(s
         .query_database(Parameters(QueryDatabaseParams {
             folder: Some("Tasks".into()),
-            filter: "p1".into(),
+            filter: Some("p1".into()),
+            view: None,
+            query: None,
         }))
         .await);
     assert_eq!(in_tasks["total"], 1);
     let table = s
         .query_database(Parameters(QueryDatabaseParams {
             folder: Some("Books".into()),
-            filter: "p1".into(),
+            filter: Some("p1".into()),
+            view: None,
+            query: None,
         }))
         .await;
     assert!(is_error(&table));
-    assert!(text_of(&table).contains("Phase 4"));
+    assert!(text_of(&table).contains("is not a database"));
+    // `view` and `query` belong to table databases only.
+    let misplaced = s
+        .query_database(Parameters(QueryDatabaseParams {
+            folder: None,
+            filter: None,
+            view: Some("Board".into()),
+            query: None,
+        }))
+        .await;
+    assert!(is_error(&misplaced));
+}
+
+fn item_props() -> Value {
+    json!([
+        {"name": "Status", "type": "select", "options": [{"name": "Todo"}, {"name": "Done"}]},
+        {"name": "Price", "type": "number"},
+        {"name": "Qty", "type": "number"},
+        {"name": "Note", "type": "text"},
+        {"name": "Total", "type": "formula", "expression": "prop(\"Price\") * prop(\"Qty\")"}
+    ])
+}
+
+fn props_of(v: Value) -> Vec<Value> {
+    v.as_array().expect("array").clone()
+}
+
+fn params<T: serde::de::DeserializeOwned>(v: Value) -> Parameters<T> {
+    Parameters(serde_json::from_value(v).expect("params"))
+}
+
+/// A table database with two rows: Apple (Todo, 2 x 3) and Pear (Done, 5 x 4).
+async fn items_db(s: &VaultMcp) {
+    ok(s.create_database(params(json!({
+        "folder": "Items",
+        "properties": props_of(item_props()),
+    })))
+    .await);
+    ok(s.create_row(params(json!({
+        "folder": "Items",
+        "title": "Apple",
+        "values": {"Status": "Todo", "Price": 2, "Qty": 3, "Total": 999},
+    })))
+    .await);
+    ok(s.create_row(params(json!({
+        "folder": "Items",
+        "title": "Pear",
+        "values": {"Status": "Done", "Price": 5, "Qty": 4},
+    })))
+    .await);
+}
+
+#[tokio::test]
+async fn table_database_create_rows_and_query() {
+    let (dir, s) = server();
+    items_db(&s).await;
+    assert!(dir.path().join("Items").join("_schema.yaml").exists());
+    assert!(dir.path().join("Items").join("Apple.md").exists());
+
+    let listed = ok(s.list_databases().await);
+    assert_eq!(listed["databases"][0]["folder"], "Items");
+    assert_eq!(listed["databases"][0]["kind"], "table");
+    assert_eq!(listed["databases"][0]["rows"], 2);
+
+    let schema = ok(s
+        .get_database_schema(params(json!({"folder": "Items"})))
+        .await);
+    assert_eq!(schema["kind"], "table");
+    assert_eq!(schema["properties"][0]["name"], "Name");
+    assert_eq!(schema["properties"][0]["type"], "title");
+    assert_eq!(schema["views"][0]["name"], "Table");
+    assert!(schema["revision"].is_string());
+
+    // Ad-hoc query: sorted by the formula, which is computed (not stored).
+    let sorted = ok(s
+        .query_database(params(json!({
+            "folder": "Items",
+            "query": {"sorts": [{"property": "Total", "descending": true}]},
+        })))
+        .await);
+    assert_eq!(sorted["rows"].as_array().expect("rows").len(), 2);
+    assert_eq!(sorted["rows"][0]["title"], "Pear");
+    assert_eq!(sorted["rows"][0]["values"]["Total"].as_f64(), Some(20.0));
+    assert_eq!(sorted["rows"][1]["values"]["Total"].as_f64(), Some(6.0));
+    assert!(sorted["groups"].is_null());
+
+    // Grouped by a select property.
+    let grouped = ok(s
+        .query_database(params(json!({
+            "folder": "Items",
+            "query": {"group_by": "Status"},
+        })))
+        .await);
+    let groups = grouped["groups"].as_array().expect("groups");
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0]["label"], "Todo");
+    assert_eq!(groups[0]["rows"].as_array().expect("rows").len(), 1);
+    assert_eq!(groups[1]["label"], "Done");
+
+    // Filter with a condition.
+    let filtered = ok(s
+        .query_database(params(json!({
+            "folder": "Items",
+            "query": {"filter": {"op": "and", "rules": [
+                {"property": "Status", "op": "is", "value": "Done"}
+            ]}},
+        })))
+        .await);
+    assert_eq!(filtered["rows"].as_array().expect("rows").len(), 1);
+    assert_eq!(filtered["rows"][0]["title"], "Pear");
+
+    // A stored view by name.
+    ok(s.update_database_schema(params(json!({
+        "folder": "Items",
+        "views": [{"name": "By status", "layout": "board", "group_by": "Status"}],
+    })))
+    .await);
+    let by_view = ok(s
+        .query_database(params(json!({"folder": "Items", "view": "by status"})))
+        .await);
+    assert_eq!(by_view["view"]["layout"], "board");
+    assert_eq!(by_view["groups"].as_array().expect("groups").len(), 2);
+}
+
+#[tokio::test]
+async fn set_row_property_changes_front_matter_and_computed_values() {
+    let (dir, s) = server();
+    items_db(&s).await;
+    let set = ok(s
+        .set_row_property(params(json!({
+            "path": "Items/Apple.md", "property": "Qty", "value": 7,
+        })))
+        .await);
+    assert_eq!(set["property"], "Qty");
+    let text = std::fs::read_to_string(dir.path().join("Items").join("Apple.md")).expect("read");
+    assert!(!text.contains("Qty: 3"), "{text}");
+
+    // Apple is now 2 x 7 = 14, Pear stays at 20.
+    let query = ok(s
+        .query_database(params(json!({
+            "folder": "Items",
+            "query": {"sorts": [{"property": "Total"}]},
+        })))
+        .await);
+    assert_eq!(query["rows"][0]["title"], "Apple");
+    assert_eq!(query["rows"][0]["values"]["Total"].as_f64(), Some(14.0));
+    assert_eq!(query["rows"][1]["values"]["Total"].as_f64(), Some(20.0));
+
+    // `null` clears a stored property.
+    ok(s.set_row_property(params(json!({
+        "path": "Items/Apple.md", "property": "Note", "value": "temporary",
+    })))
+    .await);
+    ok(s.set_row_property(params(json!({
+        "path": "Items/Apple.md", "property": "Note", "value": null,
+    })))
+    .await);
+    let text = std::fs::read_to_string(dir.path().join("Items").join("Apple.md")).expect("read");
+    assert!(!text.contains("Note"), "{text}");
+
+    // Computed properties cannot be set.
+    let computed = s
+        .set_row_property(params(json!({
+            "path": "Items/Apple.md", "property": "Total", "value": 1,
+        })))
+        .await;
+    assert!(is_error(&computed));
+}
+
+#[tokio::test]
+async fn invalid_schema_is_a_tool_error_and_writes_nothing() {
+    let (dir, s) = server();
+    items_db(&s).await;
+    let schema_path = dir.path().join("Items").join("_schema.yaml");
+    let before = std::fs::read_to_string(&schema_path).expect("read");
+
+    let dup = s
+        .update_database_schema(params(json!({
+            "folder": "Items",
+            "properties": [
+                {"name": "Price", "type": "number"},
+                {"name": "Price", "type": "text"}
+            ],
+        })))
+        .await;
+    assert!(is_error(&dup), "{}", text_of(&dup));
+    assert!(text_of(&dup).contains("duplicate"), "{}", text_of(&dup));
+
+    let bad_type = s
+        .create_database(params(json!({
+            "folder": "Other",
+            "properties": [{"name": "X", "type": "hologram"}],
+        })))
+        .await;
+    assert!(is_error(&bad_type));
+    assert!(text_of(&bad_type).contains("invalid property 1"));
+
+    let stale = s
+        .update_database_schema(params(json!({
+            "folder": "Items",
+            "properties": props_of(item_props()),
+            "revision": "not-the-revision",
+        })))
+        .await;
+    assert!(is_error(&stale));
+    assert!(text_of(&stale).contains("conflict"), "{}", text_of(&stale));
+
+    assert_eq!(std::fs::read_to_string(&schema_path).expect("read"), before);
+    assert!(!dir.path().join("Other").exists());
+}
+
+#[tokio::test]
+async fn database_writes_are_audited_without_values() {
+    let (dir, s) = server();
+    let secret = "Walrus-confidential-note-text";
+    items_db(&s).await;
+    ok(s.create_row(params(json!({
+        "folder": "Items",
+        "title": "Secret row",
+        "values": {"Note": secret, "Price": 1, "Qty": 1},
+    })))
+    .await);
+    ok(s.set_row_property(params(json!({
+        "path": "Items/Secret row.md", "property": "Note", "value": secret,
+    })))
+    .await);
+    ok(s.update_database_schema(params(json!({
+        "folder": "Items",
+        "views": [{"name": "All", "layout": "table"}],
+    })))
+    .await);
+    // A rejected schema is a logged failure, too.
+    assert!(is_error(
+        &s.update_database_schema(params(json!({
+            "folder": "Items",
+            "properties": [{"name": "A", "type": "text"}, {"name": "A", "type": "text"}],
+        })))
+        .await
+    ));
+    // Reads are not logged.
+    ok(s.query_database(params(json!({"folder": "Items"}))).await);
+    ok(s.get_database_schema(params(json!({"folder": "Items"})))
+        .await);
+    ok(s.list_databases().await);
+
+    let entries = s.audit_entries(100).await.expect("audit");
+    let tools: Vec<&str> = entries.iter().map(|e| e.tool.as_str()).collect();
+    assert_eq!(
+        tools,
+        vec![
+            "create_database",
+            "create_row",
+            "create_row",
+            "create_row",
+            "set_row_property",
+            "update_database_schema",
+            "update_database_schema",
+        ]
+    );
+    assert!(!entries[6].ok);
+    assert_eq!(entries[6].error.as_deref(), Some("invalid_arguments"));
+    assert_eq!(entries[0].targets, vec!["Items/_schema.yaml".to_string()]);
+    assert_eq!(entries[1].targets, vec!["Items/Apple.md".to_string()]);
+    assert_eq!(entries[4].targets, vec!["Items/Secret row.md".to_string()]);
+    assert!(entries[4].revision_before.is_some() && entries[4].revision_after.is_some());
+
+    let audit_dir = dir.path().join(".selenite").join("audit");
+    let mut raw = String::new();
+    for file in std::fs::read_dir(&audit_dir).expect("audit dir") {
+        raw.push_str(&std::fs::read_to_string(file.expect("entry").path()).expect("read"));
+    }
+    assert_eq!(raw.lines().count(), 7);
+    assert!(!raw.contains(secret), "row value leaked into the audit log");
+    assert!(!raw.contains("Note"), "property names must not leak either");
 }
 
 #[tokio::test]
@@ -595,13 +874,19 @@ async fn there_is_no_delete_tool() {
         "list_tags",
         "get_tree",
         "archive_page",
+        "list_databases",
+        "get_database_schema",
+        "create_database",
+        "update_database_schema",
+        "create_row",
+        "set_row_property",
     ] {
         assert!(
             names.iter().any(|n| n == expected),
             "missing tool {expected}"
         );
     }
-    assert_eq!(names.len(), 19);
+    assert_eq!(names.len(), 25);
 }
 
 #[tokio::test]

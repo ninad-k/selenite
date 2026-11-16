@@ -10,6 +10,7 @@
 //! and avoids holding a lock across an `.await`. A poisoned lock is recovered rather than
 //! propagated: the engine's state is on disk, not in memory.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::{Local, NaiveDate, NaiveDateTime};
@@ -26,12 +27,16 @@ use rmcp::{
     service::RequestContext,
     tool, tool_handler, tool_router,
 };
+use selenite_core::database::{PropertyDef, ViewDef, ViewQuery};
 use selenite_core::filter::{BuiltinView, Filter, builtin};
 use selenite_core::{APP_NAME, Due, PathError, Priority, ReminderSpec, TaskFields, VaultPath};
 use selenite_index::{Engine, EngineError, HIGHLIGHT_END, HIGHLIGHT_START, TaskItem};
-use selenite_storage::StorageError;
+use selenite_storage::{Revision, StorageError};
 use selenite_vault::replace_block;
-use selenite_vault::{BlockRef, Document, VaultError, append_blocks, layout, parse_blocks};
+use selenite_vault::{
+    BlockRef, DatabaseKind, Document, SCHEMA_FILE, VaultError, append_blocks, layout, parse_blocks,
+};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
@@ -76,9 +81,10 @@ impl From<EngineError> for ToolFail {
             EngineError::Storage(StorageError::Conflict { .. }) => "conflict",
             EngineError::Storage(StorageError::NotFound(_)) => "not_found",
             EngineError::Storage(StorageError::AlreadyExists(_)) => "already_exists",
-            EngineError::Path(_) | EngineError::NotAPage(_) | EngineError::NotUtf8(_) => {
-                "invalid_arguments"
-            }
+            EngineError::Path(_)
+            | EngineError::NotAPage(_)
+            | EngineError::NotUtf8(_)
+            | EngineError::Database(_) => "invalid_arguments",
             EngineError::Vault(VaultError::Block(_)) => "invalid_arguments",
             EngineError::Task(_) => "task_error",
             _ => "engine_error",
@@ -329,11 +335,99 @@ pub struct AgendaParams {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct QueryDatabaseParams {
-    /// Database folder (a Tasks database). Default: all tasks.
+    /// Database folder. Omit to query all tasks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
-    /// Filter expression, same syntax as `list_tasks` (`p1 & !done`, `@errand | overdue`).
-    pub filter: String,
+    /// Tasks databases only: filter expression, same syntax as `list_tasks` (`p1 & !done`,
+    /// `@errand | overdue`). Default: `open`. Not used for table databases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    /// Table databases only: name of a saved view (default: the database's first view).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
+    /// Table databases only: an ad-hoc query that replaces the view's own query. An object with
+    /// `filter` (a group `{"op": "and", "rules": [...]}` whose rules are `{"property", "op",
+    /// "value"}` conditions or nested groups), `sorts` (`[{"property", "descending"}]`) and
+    /// `group_by` (a select property name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub query: Option<Value>,
+}
+
+/// Parameters naming one database folder (empty for the vault root).
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct FolderParams {
+    /// Vault-relative database folder such as `Projects/Books`.
+    pub folder: String,
+}
+
+/// Parameters of `create_database`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct CreateDatabaseParams {
+    /// Vault-relative folder to turn into a table database. It must not already be a database.
+    pub folder: String,
+    /// Properties after the `Name` title column. Each is an object with `name` and `type`:
+    /// `text`, `number` (optional `format`), `select` or `multi_select` (`options`: `[{"name":
+    /// "Todo"}]`), `date`, `checkbox`, `url`, `relation` (`database`: folder of the target),
+    /// `rollup` (`relation`, `property`, `function`: count, sum, average, min, max, ...),
+    /// `formula` (`expression`: `prop("Price") * prop("Qty")`), `created_time`, `updated_time`.
+    #[serde(default)]
+    #[schemars(with = "Vec<serde_json::Value>")]
+    pub properties: Vec<Value>,
+}
+
+/// Parameters of `update_database_schema`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct UpdateDatabaseSchemaParams {
+    /// Vault-relative folder of a table database.
+    pub folder: String,
+    /// Replacement property list, same shape as in `create_database`. Omit to keep the current
+    /// properties.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<Vec<serde_json::Value>>")]
+    pub properties: Option<Vec<Value>>,
+    /// Replacement saved views. Each is an object with `name`, `layout` (table, board, list,
+    /// calendar, gallery, timeline), optional `group_by`, `filter`, `sorts`, `visible` (property
+    /// names), `date_property`, `end_date_property`, `cover_property`. Omit to keep the views.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<Vec<serde_json::Value>>")]
+    pub views: Option<Vec<Value>>,
+    /// Revision from `get_database_schema`. When given and the schema has changed since, nothing
+    /// is written and a conflict error is returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
+/// Parameters of `create_row`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct CreateRowParams {
+    /// Vault-relative folder of a table database.
+    pub folder: String,
+    /// Row title; also the row's file name.
+    pub title: String,
+    /// Property values by name, for example `{"Status": "Done", "Price": 9.5, "Due":
+    /// "2030-01-15"}`. Dates are `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`; lists are JSON arrays.
+    /// Computed properties (formula, rollup, created or updated time) are ignored.
+    #[serde(default)]
+    #[schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")]
+    pub values: BTreeMap<String, Value>,
+}
+
+/// Parameters of `set_row_property`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct SetRowPropertyParams {
+    /// Vault-relative path of the row (a page in a table database).
+    pub path: String,
+    /// Property name.
+    pub property: String,
+    /// The new value as JSON. `null` clears the property. Computed properties cannot be set.
+    #[schemars(with = "serde_json::Value")]
+    pub value: Value,
 }
 
 /// Parameters of `daily_note`.
@@ -351,6 +445,39 @@ pub struct DailyNoteParams {
 
 fn now() -> NaiveDateTime {
     Local::now().naive_local()
+}
+
+/// A database folder as the engine expects it: trimmed, no slashes at the ends.
+fn folder_name(raw: &str) -> String {
+    raw.trim().trim_matches('/').to_string()
+}
+
+/// Vault path (as text) of a database folder's schema file, used as the audit target.
+fn schema_target(folder: &str) -> String {
+    if folder.is_empty() {
+        SCHEMA_FILE.to_string()
+    } else {
+        format!("{folder}/{SCHEMA_FILE}")
+    }
+}
+
+/// Decode a list of JSON objects into typed definitions, naming the first bad item.
+fn parse_items<T: DeserializeOwned>(what: &str, items: &[Value]) -> ToolResult<Vec<T>> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            serde_json::from_value::<T>(v.clone())
+                .map_err(|e| ToolFail::invalid(format!("invalid {what} {}: {e}", i + 1)))
+        })
+        .collect()
+}
+
+fn to_json<T: Serialize>(value: &T) -> ToolResult<Value> {
+    serde_json::to_value(value).map_err(|e| ToolFail {
+        message: format!("could not encode the result: {e}"),
+        category: "engine_error",
+    })
 }
 
 fn page_path(raw: &str) -> ToolResult<VaultPath> {
@@ -966,7 +1093,7 @@ impl VaultMcp {
 
     /// Query a database.
     #[tool(
-        description = "Run a filter over a database folder. Currently only Tasks databases exist (same filter syntax as list_tasks); table databases arrive in a later release.",
+        description = "Query a database. Table database: give `folder` and optionally `view` (a saved view's name) or `query` (ad-hoc {filter, sorts, group_by}). Returns the matching rows with every property value (formulas and rollups computed), sorted, and `groups` when the query groups. Tasks database, or no folder for all tasks: `filter` with the list_tasks syntax (default `open`).",
         annotations(read_only_hint = true)
     )]
     pub async fn query_database(
@@ -974,21 +1101,50 @@ impl VaultMcp {
         Parameters(p): Parameters<QueryDatabaseParams>,
     ) -> CallToolResult {
         self.read(move |eng| {
-            let folder = p
-                .folder
-                .as_deref()
-                .map(|f| f.trim().trim_matches('/').to_string());
-            if let Some(f) = &folder
+            let folder = p.folder.as_deref().map(folder_name);
+            let at = now();
+            let adhoc: Option<ViewQuery> = match &p.query {
+                None => None,
+                Some(q) => Some(
+                    serde_json::from_value(q.clone())
+                        .map_err(|e| ToolFail::invalid(format!("query: {e}")))?,
+                ),
+            };
+            let kind = match &folder {
+                None => None,
+                Some(f) => match eng.database_schema(f) {
+                    Ok(schema) => Some(schema.kind),
+                    Err(EngineError::Storage(StorageError::NotFound(_))) => {
+                        return Err(ToolFail::invalid(format!(
+                            "`{f}` is not a database (no {SCHEMA_FILE} in that folder)"
+                        )));
+                    }
+                    Err(e) => return Err(e.into()),
+                },
+            };
+            if let (Some(DatabaseKind::Table), Some(f)) = (kind, folder.as_deref()) {
+                if p.filter.is_some() {
+                    return Err(ToolFail::invalid(
+                        "a table database is queried with `view` and `query`, not `filter`",
+                    ));
+                }
+                let result = eng.query_database_view(f, p.view.as_deref(), adhoc, at)?;
+                return to_json(&result);
+            }
+            if p.view.is_some() || adhoc.is_some() {
+                return Err(ToolFail::invalid(
+                    "`view` and `query` apply to table databases; give the `folder` of one",
+                ));
+            }
+            if let Some(f) = folder.as_deref()
                 && !eng.task_databases().iter().any(|d| d == f)
             {
-                return Err(ToolFail::invalid(format!(
-                    "`{f}` is not a Tasks database. Table databases arrive in Phase 4; until \
-                     then only Tasks databases can be queried (omit `folder` to query all tasks)."
-                )));
+                return Err(ToolFail::invalid(format!("`{f}` is not a Tasks database")));
             }
-            let today = Local::now().date_naive();
+            let today = at.date();
+            let filter = p.filter.as_deref().unwrap_or("open");
             let tasks: Vec<TaskItem> = eng
-                .query_tasks(&p.filter, today)?
+                .query_tasks(filter, today)?
                 .into_iter()
                 .filter(|t| {
                     folder
@@ -1000,6 +1156,157 @@ impl VaultMcp {
                 "total": tasks.len(),
                 "rows": tasks.iter().map(item_json).collect::<Vec<_>>(),
             }))
+        })
+        .await
+    }
+
+    /// List databases.
+    #[tool(
+        description = "List the databases in the vault: table databases and Tasks databases, each with its folder, kind and row count.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn list_databases(&self) -> CallToolResult {
+        self.read(|eng| {
+            let databases = eng.databases()?;
+            Ok(json!({ "databases": to_json(&databases)? }))
+        })
+        .await
+    }
+
+    /// Get a database schema.
+    #[tool(
+        description = "Get a database's schema: kind, properties (typed columns, in order), views and the schema revision to pass to update_database_schema.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn get_database_schema(
+        &self,
+        Parameters(p): Parameters<FolderParams>,
+    ) -> CallToolResult {
+        self.read(move |eng| {
+            let folder = folder_name(&p.folder);
+            let schema = eng.database_schema(&folder)?;
+            let path = VaultPath::new(&schema_target(&folder))?;
+            let (kind, properties, views) = match schema.kind {
+                DatabaseKind::Table => (
+                    "table",
+                    to_json(&schema.properties)?,
+                    to_json(&schema.table_views)?,
+                ),
+                DatabaseKind::Tasks => ("tasks", json!([]), to_json(&schema.views)?),
+            };
+            Ok(json!({
+                "folder": folder,
+                "kind": kind,
+                "revision": rev_of(eng, &path),
+                "properties": properties,
+                "views": views,
+            }))
+        })
+        .await
+    }
+
+    /// Create a table database.
+    #[tool(
+        description = "Create a table database (Workspace mode) in a new folder: a `Name` title column, the given properties and a default Table view. Fails if the folder is already a database. Validated; nothing is written when the definition is invalid.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    pub async fn create_database(
+        &self,
+        Parameters(p): Parameters<CreateDatabaseParams>,
+    ) -> CallToolResult {
+        let args = serde_json::to_value(&p).unwrap_or(Value::Null);
+        self.write("create_database", &args, move |eng, trace| {
+            let folder = folder_name(&p.folder);
+            let target = schema_target(&folder);
+            trace.targets.push(target.clone());
+            let properties: Vec<PropertyDef> = parse_items("property", &p.properties)?;
+            eng.create_database(&folder, properties)?;
+            let path = VaultPath::new(&target)?;
+            let revision = rev_of(eng, &path);
+            trace.after = revision.clone();
+            Ok(json!({"folder": folder, "path": target, "revision": revision}))
+        })
+        .await
+    }
+
+    /// Update a table database schema.
+    #[tool(
+        description = "Replace a table database's properties and/or views. Given lists replace the current ones; omitted parts are kept. The result is validated (duplicate or blank names, formula errors and cycles, rollups without a relation, views naming unknown properties); an invalid schema is a tool error and nothing is written. Pass the revision from get_database_schema to detect concurrent edits.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    pub async fn update_database_schema(
+        &self,
+        Parameters(p): Parameters<UpdateDatabaseSchemaParams>,
+    ) -> CallToolResult {
+        let args = serde_json::to_value(&p).unwrap_or(Value::Null);
+        self.write("update_database_schema", &args, move |eng, trace| {
+            let folder = folder_name(&p.folder);
+            let target = schema_target(&folder);
+            trace.targets.push(target.clone());
+            let path = VaultPath::new(&target)?;
+            let mut schema = eng.database_schema(&folder)?;
+            if schema.kind != DatabaseKind::Table {
+                return Err(ToolFail::invalid(format!(
+                    "`{folder}` is a Tasks database; only table databases have properties and views"
+                )));
+            }
+            trace.before = rev_of(eng, &path);
+            if let Some(items) = &p.properties {
+                schema.properties = parse_items("property", items)?;
+            }
+            if let Some(items) = &p.views {
+                schema.table_views = parse_items::<ViewDef>("view", items)?;
+            }
+            eng.save_database_schema(&folder, &schema, p.revision.clone().map(Revision))?;
+            let revision = rev_of(eng, &path);
+            trace.after = revision.clone();
+            Ok(json!({
+                "folder": folder,
+                "path": target,
+                "revision": revision,
+                "properties": to_json(&schema.properties)?,
+                "views": to_json(&schema.table_views)?,
+            }))
+        })
+        .await
+    }
+
+    /// Create a row.
+    #[tool(
+        description = "Add a row to a table database: a new Markdown file whose front matter holds the given property values. Fails if the title is empty. The row's path is returned; to delete a row use archive_page.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    pub async fn create_row(&self, Parameters(p): Parameters<CreateRowParams>) -> CallToolResult {
+        let args = serde_json::to_value(&p).unwrap_or(Value::Null);
+        self.write("create_row", &args, move |eng, trace| {
+            let folder = folder_name(&p.folder);
+            let path = eng.create_row(&folder, &p.title, &p.values, now())?;
+            trace.targets.push(path.as_str().to_string());
+            let revision = rev_of(eng, &path);
+            trace.after = revision.clone();
+            Ok(json!({"path": path.as_str(), "revision": revision}))
+        })
+        .await
+    }
+
+    /// Set a row property.
+    #[tool(
+        description = "Set one property of a row (table database). Only the front matter changes; the body is untouched. `value: null` clears the property. Computed properties cannot be set.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    pub async fn set_row_property(
+        &self,
+        Parameters(p): Parameters<SetRowPropertyParams>,
+    ) -> CallToolResult {
+        let args = serde_json::to_value(&p).unwrap_or(Value::Null);
+        self.write("set_row_property", &args, move |eng, trace| {
+            let path = page_path(&p.path)?;
+            trace.targets.push(path.as_str().to_string());
+            trace.before = rev_of(eng, &path);
+            eng.set_row_property(&path, &p.property, &p.value)?;
+            let revision = rev_of(eng, &path);
+            trace.after = revision.clone();
+            Ok(json!({"path": path.as_str(), "property": p.property, "revision": revision}))
         })
         .await
     }

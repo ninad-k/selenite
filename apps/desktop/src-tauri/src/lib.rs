@@ -4,12 +4,13 @@
 pub mod commands;
 pub mod state;
 
-use selenite_index::TreeNode;
+use selenite_index::{BlockPage, DatabaseInfo, TreeNode, ViewResult};
 use tauri::{Manager, State};
 
 use commands::{
-    AgendaDto, AppInfo, BacklinkDto, CmdError, OutLinkDto, PageContent, ProjectDto, QuickAddResult,
-    SaveResult, SearchHitDto, TagDto, TaskDetail, TaskDto, VaultInfo, ViewDto,
+    AgendaDto, AppInfo, BacklinkDto, BlockTypeDto, CmdError, OutLinkDto, PageContent, PageNode,
+    ProjectDto, QuickAddResult, SaveResult, SearchHitDto, TagDto, TaskDetail, TaskDto, VaultInfo,
+    ViewDto,
 };
 use state::{AppState, RemindersStatus};
 
@@ -200,6 +201,149 @@ fn reminders_status(state: State<'_, AppState>) -> RemindersStatus {
     commands::reminders_status(&state)
 }
 
+#[tauri::command]
+fn block_types() -> Vec<BlockTypeDto> {
+    commands::block_types()
+}
+
+#[tauri::command]
+fn asset_base() -> &'static str {
+    commands::ASSET_BASE
+}
+
+#[tauri::command]
+fn asset_url(
+    state: State<'_, AppState>,
+    page: String,
+    target: String,
+) -> Result<Option<String>, String> {
+    s(commands::asset_url(&state, &page, &target))
+}
+
+#[tauri::command]
+fn page_blocks(state: State<'_, AppState>, path: String) -> Result<BlockPage, String> {
+    s(commands::page_blocks(&state, &path))
+}
+
+#[tauri::command]
+fn edit_block(
+    state: State<'_, AppState>,
+    path: String,
+    edit: serde_json::Value,
+    revision: String,
+) -> Result<SaveResult, String> {
+    s(commands::edit_block(&state, &path, &edit, &revision))
+}
+
+#[tauri::command]
+fn workspace_pages(state: State<'_, AppState>) -> Result<Vec<PageNode>, String> {
+    s(commands::workspace_pages(&state))
+}
+
+#[tauri::command]
+fn create_subpage(
+    state: State<'_, AppState>,
+    parent: Option<String>,
+    title: String,
+) -> Result<String, String> {
+    s(commands::create_subpage(&state, parent.as_deref(), &title))
+}
+
+#[tauri::command]
+fn set_page_meta(
+    state: State<'_, AppState>,
+    path: String,
+    icon: Option<String>,
+    cover: Option<String>,
+) -> Result<SaveResult, String> {
+    s(commands::set_page_meta(
+        &state,
+        &path,
+        icon.as_deref(),
+        cover.as_deref(),
+    ))
+}
+
+#[tauri::command]
+fn databases(state: State<'_, AppState>) -> Result<Vec<DatabaseInfo>, String> {
+    s(commands::databases(&state))
+}
+
+#[tauri::command]
+fn database_schema(
+    state: State<'_, AppState>,
+    folder: String,
+) -> Result<serde_json::Value, String> {
+    s(commands::database_schema(&state, &folder))
+}
+
+#[tauri::command]
+fn database_view(
+    state: State<'_, AppState>,
+    folder: String,
+    view: Option<String>,
+    query: Option<serde_json::Value>,
+) -> Result<ViewResult, String> {
+    s(commands::database_view(
+        &state,
+        &folder,
+        view.as_deref(),
+        query.as_ref(),
+    ))
+}
+
+#[tauri::command]
+fn database_create(
+    state: State<'_, AppState>,
+    folder: String,
+    properties: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    s(commands::database_create(&state, &folder, &properties))
+}
+
+#[tauri::command]
+fn database_schema_save(
+    state: State<'_, AppState>,
+    folder: String,
+    schema: serde_json::Value,
+) -> Result<(), String> {
+    s(commands::database_schema_save(&state, &folder, &schema))
+}
+
+#[tauri::command]
+fn row_create(
+    state: State<'_, AppState>,
+    folder: String,
+    title: String,
+    values: std::collections::BTreeMap<String, serde_json::Value>,
+) -> Result<String, String> {
+    s(commands::row_create(&state, &folder, &title, &values))
+}
+
+#[tauri::command]
+fn row_set(
+    state: State<'_, AppState>,
+    path: String,
+    property: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    s(commands::row_set(&state, &path, &property, &value))
+}
+
+fn asset_response(app: &tauri::AppHandle, request_path: &str) -> tauri::http::Response<Vec<u8>> {
+    let builder = tauri::http::Response::builder().header("Access-Control-Allow-Origin", "*");
+    let state = app.state::<AppState>();
+    let result = match commands::read_asset(&state, request_path) {
+        Ok((bytes, ct)) => builder
+            .status(200)
+            .header("Content-Type", ct)
+            .header("X-Content-Type-Options", "nosniff")
+            .body(bytes),
+        Err(commands::AssetError(code)) => builder.status(code).body(Vec::new()),
+    };
+    result.unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
+}
+
 /// Start the desktop application and block until the window closes.
 ///
 /// # Errors
@@ -211,6 +355,9 @@ pub fn run() -> Result<(), tauri::Error> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
     tauri::Builder::default()
+        .register_uri_scheme_protocol("vault", |ctx, request| {
+            asset_response(ctx.app_handle(), request.uri().path())
+        })
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
             let notifier = selenite_reminders::default_notifier(&app.config().identifier);
@@ -251,7 +398,22 @@ pub fn run() -> Result<(), tauri::Error> {
             task_agenda,
             task_views,
             task_view_save,
-            reminders_status
+            reminders_status,
+            block_types,
+            asset_base,
+            asset_url,
+            page_blocks,
+            edit_block,
+            workspace_pages,
+            create_subpage,
+            set_page_meta,
+            databases,
+            database_schema,
+            database_view,
+            database_create,
+            database_schema_save,
+            row_create,
+            row_set
         ])
         .run(tauri::generate_context!())
 }

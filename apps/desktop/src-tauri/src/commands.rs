@@ -6,11 +6,14 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{NaiveDate, NaiveDateTime};
+use selenite_core::database::{PropertyDef, ViewQuery};
 use selenite_core::{Due, Mode, PathError, Priority, ReminderSpec, TaskFields, VaultPath};
-use selenite_index::{Agenda, Engine, EngineError, TaskItem, TreeNode};
+use selenite_index::{
+    Agenda, BlockEdit, BlockPage, DatabaseInfo, Engine, EngineError, TaskItem, TreeNode, ViewResult,
+};
 use selenite_reminders::PlannerInput;
 use selenite_storage::{Revision, StorageError};
-use selenite_vault::{Document, SavedView};
+use selenite_vault::{DatabaseSchema, Document, PropertyValue, SavedView};
 use serde::{Deserialize, Serialize};
 
 use crate::state::{AppState, RemindersStatus};
@@ -988,6 +991,526 @@ pub fn reminders_status(state: &AppState) -> RemindersStatus {
     state.lock_reminders().clone()
 }
 
+// ---------------------------------------------------------------- workspace
+
+/// Base URL the UI uses for vault assets (served by the `vault` URI scheme). Windows webviews
+/// map custom schemes to `http://<scheme>.localhost/`.
+pub const ASSET_BASE: &str = if cfg!(windows) {
+    "http://vault.localhost/"
+} else {
+    "vault://localhost/"
+};
+
+/// One node of the Workspace page tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PageNode {
+    /// Display title.
+    pub name: String,
+    /// Page path (`page`), database folder (`database`, `tasks`) or folder path (`folder`).
+    pub path: String,
+    /// `page`, `database`, `tasks` or `folder`.
+    pub kind: String,
+    /// Page icon from front matter.
+    pub icon: Option<String>,
+    /// Sub-pages and databases.
+    pub children: Vec<PageNode>,
+}
+
+/// A block type offered by the slash menu.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BlockTypeDto {
+    /// Template id.
+    pub kind: String,
+    /// Menu label.
+    pub label: String,
+    /// Short description.
+    pub hint: String,
+    /// Markdown skeleton.
+    pub markdown: String,
+}
+
+const BLOCK_TYPES: &[(&str, &str, &str)] = &[
+    ("text", "Text", "Plain paragraph"),
+    ("h1", "Heading 1", "Large section title"),
+    ("h2", "Heading 2", "Medium section title"),
+    ("h3", "Heading 3", "Small section title"),
+    ("bullet", "Bulleted list", "Unordered list"),
+    ("numbered", "Numbered list", "Ordered list"),
+    ("todo", "To-do", "Checkbox item"),
+    ("toggle", "Toggle", "Collapsible section"),
+    ("quote", "Quote", "Quoted text"),
+    ("callout", "Callout", "Highlighted note"),
+    ("code", "Code", "Code block"),
+    ("divider", "Divider", "Horizontal rule"),
+    ("image", "Image", "Image from a path or URL"),
+    ("file", "File", "Link to a file"),
+    ("embed", "Embed", "Embed a page or file"),
+    ("table", "Table", "Simple table"),
+];
+
+/// Block types for the slash menu, with their Markdown skeletons.
+#[must_use]
+pub fn block_types() -> Vec<BlockTypeDto> {
+    BLOCK_TYPES
+        .iter()
+        .map(|(kind, label, hint)| BlockTypeDto {
+            kind: (*kind).to_owned(),
+            label: (*label).to_owned(),
+            hint: (*hint).to_owned(),
+            markdown: selenite_vault::block_template(kind)
+                .unwrap_or_default()
+                .to_owned(),
+        })
+        .collect()
+}
+
+/// Split a page into rendered blocks.
+///
+/// # Errors
+///
+/// Fails when the path is invalid or the page cannot be read.
+pub fn page_blocks(state: &AppState, path: &str) -> Result<BlockPage, CmdError> {
+    let p = vp(path)?;
+    state.with_engine(|e| Ok(e.page_blocks(&p, ASSET_BASE)?))
+}
+
+/// Apply one block edit (`{"op": "replace"|"insert"|"delete"|"move"|"toggle_task", ...}`),
+/// conditional on the revision the UI rendered.
+///
+/// # Errors
+///
+/// A stale revision yields [`CmdError::Conflict`]; a malformed edit is an error.
+pub fn edit_block(
+    state: &AppState,
+    path: &str,
+    edit: &serde_json::Value,
+    revision: &str,
+) -> Result<SaveResult, CmdError> {
+    let p = vp(path)?;
+    let edit: BlockEdit = serde_json::from_value(edit.clone())
+        .map_err(|e| CmdError::Task(format!("bad edit: {e}")))?;
+    state.with_engine(|e| {
+        let rev = e.edit_block(&p, &edit, Revision(revision.to_owned()))?;
+        Ok(SaveResult { revision: rev.0 })
+    })
+}
+
+fn page_meta(e: &Engine, path: &str) -> (Option<String>, String) {
+    let stem = path
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .trim_end_matches(".md")
+        .to_owned();
+    let Ok(p) = VaultPath::new(path) else {
+        return (None, stem);
+    };
+    let Ok((text, _)) = e.read_page(&p) else {
+        return (None, stem);
+    };
+    let doc = Document::parse(&text);
+    let icon = doc
+        .property("icon")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .filter(|s| !s.is_empty());
+    (icon, doc.title().unwrap_or(stem))
+}
+
+fn build_nodes(
+    e: &Engine,
+    dir: &TreeNode,
+    dbs: &std::collections::HashMap<String, String>,
+) -> Vec<PageNode> {
+    let mut nodes = Vec::new();
+    for file in dir
+        .children
+        .iter()
+        .filter(|c| !c.is_dir && c.name.to_lowercase().ends_with(".md"))
+    {
+        let stem = &file.name[..file.name.len() - 3];
+        let sub = dir
+            .children
+            .iter()
+            .find(|d| d.is_dir && d.name == stem && !dbs.contains_key(&d.path));
+        let (icon, title) = page_meta(e, &file.path);
+        nodes.push(PageNode {
+            name: title,
+            path: file.path.clone(),
+            kind: "page".into(),
+            icon,
+            children: sub.map(|d| build_nodes(e, d, dbs)).unwrap_or_default(),
+        });
+    }
+    for d in dir.children.iter().filter(|c| c.is_dir) {
+        if let Some(kind) = dbs.get(&d.path) {
+            nodes.push(PageNode {
+                name: d.name.clone(),
+                path: d.path.clone(),
+                kind: if kind == "tasks" { "tasks" } else { "database" }.into(),
+                icon: None,
+                children: Vec::new(),
+            });
+            continue;
+        }
+        let has_page = dir
+            .children
+            .iter()
+            .any(|f| !f.is_dir && f.name == format!("{}.md", d.name));
+        if has_page {
+            continue;
+        }
+        let children = build_nodes(e, d, dbs);
+        if !children.is_empty() {
+            nodes.push(PageNode {
+                name: d.name.clone(),
+                path: d.path.clone(),
+                kind: "folder".into(),
+                icon: None,
+                children,
+            });
+        }
+    }
+    nodes.sort_by_key(|n| n.name.to_lowercase());
+    nodes
+}
+
+/// The nested page tree for the Workspace sidebar. A page `A.md` with a sibling folder `A/`
+/// has the pages in `A/` as children; database folders appear as database (or task list)
+/// nodes; hidden folders are excluded.
+///
+/// # Errors
+///
+/// Fails when no vault is open or storage fails.
+pub fn workspace_pages(state: &AppState) -> Result<Vec<PageNode>, CmdError> {
+    state.with_engine(|e| {
+        let tree = e.tree()?;
+        let dbs = e
+            .databases()?
+            .into_iter()
+            .map(|d| (d.folder, d.kind))
+            .collect();
+        Ok(build_nodes(e, &tree, &dbs))
+    })
+}
+
+/// Create a sub-page `Parent/Title.md` (folder `Parent/` next to `Parent.md`), or a top-level
+/// page when `parent` is `None`. Returns the new page path.
+///
+/// # Errors
+///
+/// Fails if the title is empty, the page exists or the parent path is invalid.
+pub fn create_subpage(
+    state: &AppState,
+    parent: Option<&str>,
+    title: &str,
+) -> Result<String, CmdError> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(CmdError::Task("a page needs a title".into()));
+    }
+    let folder = match parent.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => {
+            let pp = vp(p)?;
+            Some(if pp.is_markdown() {
+                p.replace('\\', "/")[..p.len() - 3].to_owned()
+            } else {
+                pp.to_string()
+            })
+        }
+        None => None,
+    };
+    state.with_engine(|e| {
+        Ok(
+            e.create_titled_page(title, folder.as_deref(), &format!("# {title}\n"))?
+                .to_string(),
+        )
+    })
+}
+
+/// Set (`Some(text)`), clear (`Some("")`) or keep (`None`) the `icon` and `cover` front matter of a page. The body is
+/// untouched and the write is conditional on the revision read inside this call.
+///
+/// # Errors
+///
+/// Fails when the page cannot be read, has invalid front matter, or changed meanwhile.
+pub fn set_page_meta(
+    state: &AppState,
+    path: &str,
+    icon: Option<&str>,
+    cover: Option<&str>,
+) -> Result<SaveResult, CmdError> {
+    let p = vp(path)?;
+    state.with_engine(|e| {
+        let (text, rev) = e.read_page(&p)?;
+        let mut doc = Document::parse(&text);
+        if doc.front_matter_error().is_some() {
+            return Err(CmdError::Task(
+                "the page has invalid front matter; fix it by hand first".into(),
+            ));
+        }
+        for (key, value) in [("icon", icon), ("cover", cover)] {
+            match value.map(str::trim) {
+                None => {}
+                Some("") => {
+                    doc.remove_property(key);
+                }
+                Some(v) => doc.set_property(key, PropertyValue::Text(v.to_owned())),
+            }
+        }
+        let entry = e.save_page(&p, &doc.to_text(), Some(rev))?;
+        Ok(SaveResult {
+            revision: entry.revision.0,
+        })
+    })
+}
+
+// ---------------------------------------------------------------- assets
+
+/// Why an asset request failed (an HTTP status).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssetError(pub u16);
+
+fn percent_decode(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = raw.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Validate the path of an asset request (`/folder/pic.png`, percent-encoded) as a visible
+/// vault path: no `..`, no absolute or drive paths, nothing hidden such as `.selenite`.
+///
+/// # Errors
+///
+/// Returns [`AssetError`] 400 for malformed or escaping paths and 403 for hidden ones.
+pub fn asset_vault_path(request_path: &str) -> Result<VaultPath, AssetError> {
+    let decoded = percent_decode(request_path.strip_prefix('/').unwrap_or(request_path))
+        .ok_or(AssetError(400))?;
+    if decoded.contains('\0') {
+        return Err(AssetError(400));
+    }
+    let p = VaultPath::new(&decoded).map_err(|_| AssetError(400))?;
+    if p.is_hidden() {
+        return Err(AssetError(403));
+    }
+    Ok(p)
+}
+
+/// Content type for an asset by file extension.
+#[must_use]
+pub fn asset_content_type(path: &VaultPath) -> &'static str {
+    match path.extension().as_deref() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("avif") => "image/avif",
+        Some("bmp") => "image/bmp",
+        Some("pdf") => "application/pdf",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Read an asset for the `vault` URI scheme. Only files inside the open vault root are served.
+///
+/// # Errors
+///
+/// 400/403 for bad paths, 404 when the file or vault is missing.
+pub fn read_asset(
+    state: &AppState,
+    request_path: &str,
+) -> Result<(Vec<u8>, &'static str), AssetError> {
+    let p = asset_vault_path(request_path)?;
+    let ct = asset_content_type(&p);
+    state
+        .with_engine(|e| {
+            e.storage()
+                .read(&p)
+                .map_err(|err| CmdError::Engine(EngineError::from(err)))
+        })
+        .map(|bytes| (bytes, ct))
+        .map_err(|_| AssetError(404))
+}
+
+/// Resolve an image reference (for example a gallery cover value) written relative to `page`
+/// to an asset URL; `None` when the file does not exist.
+///
+/// # Errors
+///
+/// Fails when no vault is open or storage fails.
+pub fn asset_url(state: &AppState, page: &str, target: &str) -> Result<Option<String>, CmdError> {
+    let t = target.trim();
+    if t.starts_with("https://") || t.starts_with("http://") {
+        return Ok(Some(t.to_owned()));
+    }
+    if t.is_empty() {
+        return Ok(None);
+    }
+    let dir = page.rsplit_once('/').map(|(d, _)| d);
+    state.with_engine(|e| {
+        let mut candidates = Vec::new();
+        if let Some(d) = dir {
+            candidates.push(format!("{d}/{t}"));
+        }
+        candidates.push(t.to_owned());
+        for c in candidates {
+            if let Ok(p) = VaultPath::new(&c) {
+                if !p.is_hidden() && e.storage().stat(&p).map_err(EngineError::from)?.is_some() {
+                    return Ok(Some(encode_asset(ASSET_BASE, p.as_str())));
+                }
+            }
+        }
+        let name = t.rsplit('/').next().unwrap_or(t).to_lowercase();
+        let mut found: Vec<VaultPath> = e
+            .storage()
+            .list()
+            .map_err(EngineError::from)?
+            .into_iter()
+            .map(|x| x.path)
+            .filter(|p| !p.is_hidden() && p.file_name().to_lowercase() == name)
+            .collect();
+        found.sort_by_key(|p| p.as_str().len());
+        Ok(found.first().map(|p| encode_asset(ASSET_BASE, p.as_str())))
+    })
+}
+
+fn encode_asset(base: &str, p: &str) -> String {
+    let mut out = String::from(base);
+    for b in p.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------- databases
+
+/// Every database folder (tables and task lists).
+///
+/// # Errors
+///
+/// Fails when no vault is open.
+pub fn databases(state: &AppState) -> Result<Vec<DatabaseInfo>, CmdError> {
+    state.with_engine(|e| Ok(e.databases()?))
+}
+
+/// A database's schema as JSON (`kind`, `properties`, `table_views`, ...).
+///
+/// # Errors
+///
+/// Fails when the folder is not a database.
+pub fn database_schema(state: &AppState, folder: &str) -> Result<serde_json::Value, CmdError> {
+    state.with_engine(|e| {
+        let schema = e.database_schema(folder)?;
+        serde_json::to_value(schema).map_err(|err| CmdError::Task(err.to_string()))
+    })
+}
+
+/// Apply a saved view (by name, default first) or an ad-hoc `ViewQuery` JSON to a database.
+///
+/// # Errors
+///
+/// Fails on a bad query, unknown view or non-table database.
+pub fn database_view(
+    state: &AppState,
+    folder: &str,
+    view: Option<&str>,
+    query: Option<&serde_json::Value>,
+) -> Result<ViewResult, CmdError> {
+    let adhoc: Option<ViewQuery> = match query {
+        Some(q) if !q.is_null() => Some(
+            serde_json::from_value(q.clone())
+                .map_err(|e| CmdError::Task(format!("bad query: {e}")))?,
+        ),
+        _ => None,
+    };
+    state.with_engine(|e| Ok(e.query_database_view(folder, view, adhoc, local_now())?))
+}
+
+/// Create a table database in `folder` with a `Name` title property plus `properties`
+/// (`PropertyDef` JSON objects such as `{"name": "Status", "type": "select", "options": []}`).
+///
+/// # Errors
+///
+/// Fails on malformed or invalid properties, or when the folder is already a database.
+pub fn database_create(
+    state: &AppState,
+    folder: &str,
+    properties: &[serde_json::Value],
+) -> Result<(), CmdError> {
+    let defs: Vec<PropertyDef> = properties
+        .iter()
+        .map(|p| {
+            serde_json::from_value(p.clone())
+                .map_err(|e| CmdError::Task(format!("bad property: {e}")))
+        })
+        .collect::<Result<_, _>>()?;
+    state.with_engine(|e| Ok(e.create_database(folder, defs)?))
+}
+
+/// Replace a database schema (properties and views); validated before writing.
+///
+/// # Errors
+///
+/// Fails on a malformed or invalid schema.
+pub fn database_schema_save(
+    state: &AppState,
+    folder: &str,
+    schema: &serde_json::Value,
+) -> Result<(), CmdError> {
+    let schema: DatabaseSchema = serde_json::from_value(schema.clone())
+        .map_err(|e| CmdError::Task(format!("bad schema: {e}")))?;
+    state.with_engine(|e| Ok(e.save_database_schema(folder, &schema, None)?))
+}
+
+/// Add a row to a database; returns its path.
+///
+/// # Errors
+///
+/// Fails when the title is empty or the folder is not a table database.
+pub fn row_create(
+    state: &AppState,
+    folder: &str,
+    title: &str,
+    values: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Result<String, CmdError> {
+    state.with_engine(|e| {
+        Ok(e.create_row(folder, title, values, local_now())?
+            .to_string())
+    })
+}
+
+/// Set (or clear with `null`) one property of a row.
+///
+/// # Errors
+///
+/// Fails for computed or unknown properties.
+pub fn row_set(
+    state: &AppState,
+    path: &str,
+    property: &str,
+    value: &serde_json::Value,
+) -> Result<(), CmdError> {
+    let p = vp(path)?;
+    state.with_engine(|e| Ok(e.set_row_property(&p, property, value)?))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -999,6 +1522,238 @@ mod tests {
         let vault = dir.path().join("vault");
         create_vault(&state, vault.to_str().unwrap()).unwrap();
         (dir, state)
+    }
+
+    fn names(nodes: &[PageNode]) -> Vec<String> {
+        nodes.iter().map(|n| n.name.clone()).collect()
+    }
+
+    #[test]
+    fn workspace_pages_nest_subpages_and_list_databases() {
+        let (_d, state) = fixture();
+        let a = create_subpage(&state, None, "Alpha").unwrap();
+        assert_eq!(a, "Alpha.md");
+        let b = create_subpage(&state, Some(&a), "Beta").unwrap();
+        assert_eq!(b, "Alpha/Beta.md");
+        let c = create_subpage(&state, Some(&b), "Gamma").unwrap();
+        assert_eq!(c, "Alpha/Beta/Gamma.md");
+        database_create(&state, "Projects", &[]).unwrap();
+        state
+            .with_engine(|e| {
+                let mut s = selenite_vault::DatabaseSchema::tasks();
+                s.version = 1;
+                e.storage()
+                    .write(
+                        &VaultPath::new("Chores/_schema.yaml").unwrap(),
+                        s.to_yaml().unwrap().as_bytes(),
+                        selenite_storage::WriteMode::CreateNew,
+                    )
+                    .map_err(EngineError::from)?;
+                Ok(())
+            })
+            .unwrap();
+        refresh(&state).unwrap();
+        let tree = workspace_pages(&state).unwrap();
+        let alpha = tree.iter().find(|n| n.name == "Alpha").unwrap();
+        assert_eq!(alpha.kind, "page");
+        assert_eq!(names(&alpha.children), vec!["Beta"]);
+        assert_eq!(names(&alpha.children[0].children), vec!["Gamma"]);
+        // The Alpha folder is not listed a second time.
+        assert_eq!(tree.iter().filter(|n| n.path == "Alpha").count(), 0);
+        let proj = tree.iter().find(|n| n.name == "Projects").unwrap();
+        assert_eq!(proj.kind, "database");
+        let chores = tree.iter().find(|n| n.name == "Chores").unwrap();
+        assert_eq!(chores.kind, "tasks");
+        // Hidden folders never show.
+        assert!(!tree.iter().any(|n| n.path.starts_with('.')));
+    }
+
+    #[test]
+    fn create_subpage_rejects_empty_title_and_duplicates() {
+        let (_d, state) = fixture();
+        assert!(create_subpage(&state, None, "  ").is_err());
+        create_subpage(&state, None, "Dup").unwrap();
+        assert!(create_subpage(&state, None, "Dup").is_err());
+    }
+
+    #[test]
+    fn set_page_meta_keeps_body_bytes() {
+        let (_d, state) = fixture();
+        let a = create_page(&state, "Meta", None).unwrap();
+        let body = "# Meta\n\nHello  world\t!\n\n- a\n- b\n\n```\ncode\n```\n";
+        let rd = read_page(&state, &a).unwrap();
+        save_page(&state, &a, body, &rd.revision).unwrap();
+        set_page_meta(&state, &a, Some("🌙"), Some("cover.png")).unwrap();
+        let after = read_page(&state, &a).unwrap().text;
+        assert!(after.ends_with(body), "{after:?}");
+        assert!(after.contains("icon:") && after.contains("cover:"));
+        let blocks = page_blocks(&state, &a).unwrap();
+        assert_eq!(blocks.icon.as_deref(), Some("🌙"));
+        set_page_meta(&state, &a, Some(""), Some("")).unwrap();
+        let cleared = read_page(&state, &a).unwrap().text;
+        assert!(cleared.ends_with(body));
+        assert!(!cleared.contains("icon:"));
+    }
+
+    #[test]
+    fn edit_block_replaces_and_conflicts_on_stale_revision() {
+        let (_d, state) = fixture();
+        let a = create_page(&state, "Blocks", None).unwrap();
+        let rd = read_page(&state, &a).unwrap();
+        save_page(&state, &a, "# Blocks\n\nOne\n\nTwo\n", &rd.revision).unwrap();
+        let page = page_blocks(&state, &a).unwrap();
+        assert_eq!(page.blocks.len(), 3);
+        let edit = serde_json::json!({"op": "replace", "block": "1", "markdown": "Uno"});
+        let saved = edit_block(&state, &a, &edit, &page.revision).unwrap();
+        assert_ne!(saved.revision, page.revision);
+        let again = edit_block(&state, &a, &edit, &page.revision).unwrap_err();
+        assert!(again.to_string().starts_with("CONFLICT:"), "{again}");
+        let mv = serde_json::json!({"op": "move", "block": "1", "to": 2});
+        let moved = edit_block(&state, &a, &mv, &saved.revision).unwrap();
+        let text = read_page(&state, &a).unwrap();
+        assert_eq!(text.revision, moved.revision);
+        assert!(text.text.find("Two").unwrap() < text.text.find("Uno").unwrap());
+        assert!(
+            edit_block(
+                &state,
+                &a,
+                &serde_json::json!({"op": "nope"}),
+                &moved.revision
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn asset_paths_reject_escapes_and_hidden() {
+        assert_eq!(asset_vault_path("/a/b.png").unwrap().as_str(), "a/b.png");
+        assert_eq!(
+            asset_vault_path("/My%20Pics/x.png").unwrap().as_str(),
+            "My Pics/x.png"
+        );
+        assert_eq!(asset_vault_path("/../secret.txt"), Err(AssetError(400)));
+        assert_eq!(asset_vault_path("/a/%2e%2e/b.png"), Err(AssetError(400)));
+        assert_eq!(asset_vault_path("/a/..%2Fb.png"), Err(AssetError(400)));
+        assert_eq!(asset_vault_path("/C:/Windows/x.png"), Err(AssetError(400)));
+        assert_eq!(asset_vault_path("//etc/passwd"), Err(AssetError(400)));
+        assert_eq!(
+            asset_vault_path("/.selenite/index.sqlite"),
+            Err(AssetError(403))
+        );
+        assert_eq!(asset_vault_path("/a/.hidden/x.png"), Err(AssetError(403)));
+        assert_eq!(asset_vault_path("/%zz"), Err(AssetError(400)));
+        assert_eq!(asset_vault_path("/"), Err(AssetError(400)));
+        assert_eq!(
+            asset_content_type(&VaultPath::new("a.PNG").unwrap()),
+            "image/png"
+        );
+        assert_eq!(
+            asset_content_type(&VaultPath::new("a.bin").unwrap()),
+            "application/octet-stream"
+        );
+    }
+
+    #[test]
+    fn read_asset_serves_vault_files_only() {
+        let (dir, state) = fixture();
+        let root = dir.path().join("vault");
+        std::fs::write(root.join("pic.png"), [1u8, 2, 3]).unwrap();
+        std::fs::write(dir.path().join("outside.png"), [9u8]).unwrap();
+        let (bytes, ct) = read_asset(&state, "/pic.png").unwrap();
+        assert_eq!((bytes, ct), (vec![1, 2, 3], "image/png"));
+        assert_eq!(read_asset(&state, "/missing.png"), Err(AssetError(404)));
+        assert_eq!(read_asset(&state, "/../outside.png"), Err(AssetError(400)));
+        assert_eq!(
+            read_asset(&state, "/.selenite/config.json"),
+            Err(AssetError(403))
+        );
+        let img = create_page(&state, "Img", None).unwrap();
+        let rd = read_page(&state, &img).unwrap();
+        save_page(&state, &img, "# Img\n\n![[pic.png]]\n", &rd.revision).unwrap();
+        let page = page_blocks(&state, &img).unwrap();
+        let html = &page.blocks[1].html;
+        assert!(
+            html.contains(&format!("src=\"{ASSET_BASE}pic.png\"")),
+            "{html}"
+        );
+        assert_eq!(
+            asset_url(&state, &img, "pic.png").unwrap().as_deref(),
+            Some(format!("{ASSET_BASE}pic.png").as_str())
+        );
+    }
+
+    #[test]
+    fn database_round_trip_with_rows_and_group_by() {
+        let (_d, state) = fixture();
+        let props = vec![
+            serde_json::json!({"name": "Status", "type": "select",
+                "options": [{"name": "Todo"}, {"name": "Doing"}, {"name": "Done"}]}),
+            serde_json::json!({"name": "Price", "type": "number"}),
+            serde_json::json!({"name": "Qty", "type": "number"}),
+            serde_json::json!({"name": "Total", "type": "formula", "expression": "prop(\"Price\") * prop(\"Qty\")"}),
+        ];
+        database_create(&state, "Projects", &props).unwrap();
+        assert!(database_create(&state, "Projects", &props).is_err());
+        let dbs = databases(&state).unwrap();
+        assert_eq!(dbs.len(), 1);
+        assert_eq!(dbs[0].kind, "table");
+        let mut vals = std::collections::BTreeMap::new();
+        vals.insert("Status".to_owned(), serde_json::json!("Todo"));
+        vals.insert("Price".to_owned(), serde_json::json!(4));
+        vals.insert("Qty".to_owned(), serde_json::json!(3));
+        let p1 = row_create(&state, "Projects", "Alpha", &vals).unwrap();
+        assert_eq!(p1, "Projects/Alpha.md");
+        let p2 = row_create(&state, "Projects", "Beta", &vals).unwrap();
+        row_create(
+            &state,
+            "Projects",
+            "Gamma",
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        row_set(&state, &p2, "Status", &serde_json::json!("Doing")).unwrap();
+        assert!(row_set(&state, &p2, "Total", &serde_json::json!(1)).is_err());
+        let view = database_view(&state, "Projects", None, None).unwrap();
+        assert_eq!(view.rows.len(), 3);
+        let alpha = view.rows.iter().find(|r| r.title == "Alpha").unwrap();
+        assert_eq!(alpha.values["Total"], selenite_core::Value::Number(12.0));
+        let q = serde_json::json!({"group_by": "Status"});
+        let grouped = database_view(&state, "Projects", None, Some(&q)).unwrap();
+        let groups = grouped.groups.unwrap();
+        let labels: Vec<_> = groups.iter().map(|g| g.label.as_str()).collect();
+        assert!(
+            labels.contains(&"Todo") && labels.contains(&"Doing"),
+            "{labels:?}"
+        );
+        let filtered = serde_json::json!({"filter": {"op": "and", "rules": [
+            {"property": "Status", "op": "is", "value": "Doing"}]}});
+        let only = database_view(&state, "Projects", None, Some(&filtered)).unwrap();
+        assert_eq!(only.rows.len(), 1);
+        assert_eq!(only.rows[0].title, "Beta");
+        // Save a view into the schema and read it back.
+        let mut schema = database_schema(&state, "Projects").unwrap();
+        schema["table_views"] = serde_json::json!([
+            {"name": "Table", "layout": "table"},
+            {"name": "Doing", "layout": "board", "group_by": "Status",
+             "filter": {"op": "and", "rules": [
+                {"property": "Status", "op": "is", "value": "Doing"}]}}
+        ]);
+        database_schema_save(&state, "Projects", &schema).unwrap();
+        let doing = database_view(&state, "Projects", Some("Doing"), None).unwrap();
+        assert_eq!(doing.views.len(), 2);
+        assert_eq!(doing.rows.len(), 1);
+        assert!(database_schema_save(&state, "Projects", &serde_json::json!({"kind": 5})).is_err());
+    }
+
+    #[test]
+    fn block_types_cover_all_templates() {
+        let types = block_types();
+        assert_eq!(types.len(), 16);
+        assert!(
+            types
+                .iter()
+                .any(|t| t.kind == "callout" && t.markdown.contains("[!note]"))
+        );
     }
 
     #[test]

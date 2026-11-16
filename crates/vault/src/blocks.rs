@@ -132,9 +132,17 @@ fn kind_of(tag: &Tag<'_>) -> BlockKind {
     }
 }
 
+/// Parser options shared by block splitting and rendering, so both see the same structure.
+pub(crate) fn parser_options() -> Options {
+    Options::ENABLE_TABLES
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_STRIKETHROUGH
+}
+
 /// Split a page body into its top-level blocks.
 pub fn parse_blocks(body: &str) -> Vec<Block> {
-    let opts = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_FOOTNOTES;
+    let opts = parser_options();
     let mut raw: Vec<(BlockKind, usize, usize)> = Vec::new();
     let mut depth = 0usize;
     let mut open: Option<(BlockKind, usize)> = None;
@@ -216,18 +224,7 @@ pub fn append_blocks(body: &str, markdown: &str) -> String {
 /// the new text (unless that ends in a code block).
 pub fn replace_block(body: &str, r: &BlockRef, markdown: &str) -> Result<String, VaultError> {
     let blocks = parse_blocks(body);
-    let block = match r {
-        BlockRef::Index(i) => blocks.get(*i).ok_or_else(|| {
-            VaultError::Block(format!(
-                "block index {i} out of range (page has {} blocks)",
-                blocks.len()
-            ))
-        })?,
-        BlockRef::Anchor(id) => blocks
-            .iter()
-            .find(|b| b.anchor.as_deref() == Some(id.as_str()))
-            .ok_or_else(|| VaultError::Block(format!("no block with anchor ^{id}")))?,
-    };
+    let block = resolve(&blocks, r)?;
     let eol = eol_of(body);
     let mut new = normalise(markdown, eol);
     if new.is_empty() {
@@ -248,6 +245,225 @@ pub fn replace_block(body: &str, r: &BlockRef, markdown: &str) -> Result<String,
     out.push_str(&new);
     out.push_str(&body[block.end..]);
     Ok(out)
+}
+
+fn resolve<'a>(blocks: &'a [Block], r: &BlockRef) -> Result<&'a Block, VaultError> {
+    match r {
+        BlockRef::Index(i) => blocks.get(*i).ok_or_else(|| {
+            VaultError::Block(format!(
+                "block index {i} out of range (page has {} blocks)",
+                blocks.len()
+            ))
+        }),
+        BlockRef::Anchor(id) => blocks
+            .iter()
+            .find(|b| b.anchor.as_deref() == Some(id.as_str()))
+            .ok_or_else(|| VaultError::Block(format!("no block with anchor ^{id}"))),
+    }
+}
+
+/// Insert already-final `text` (no normalisation) as a block after block `after` (or at the
+/// start), with one blank line between it and its neighbour.
+fn insert_raw(body: &str, blocks: &[Block], after: Option<usize>, text: &str) -> String {
+    let eol = eol_of(body);
+    if blocks.is_empty() {
+        return format!("{body}{text}{eol}");
+    }
+    let mut out = String::with_capacity(body.len() + text.len() + 4);
+    match after.and_then(|i| blocks.get(i)) {
+        Some(b) => {
+            out.push_str(&body[..b.end]);
+            out.push_str(eol);
+            out.push_str(eol);
+            out.push_str(text);
+            out.push_str(&body[b.end..]);
+        }
+        None => {
+            let at = blocks[0].start;
+            out.push_str(&body[..at]);
+            out.push_str(text);
+            out.push_str(eol);
+            out.push_str(eol);
+            out.push_str(&body[at..]);
+        }
+    }
+    out
+}
+
+/// Insert Markdown as a new block after `after` (`None` = at the start of the page), separated
+/// by one blank line. Line endings in `markdown` follow the body. Trailing spaces on the last
+/// line are kept so slash-menu templates such as `- ` survive. Bytes outside the insertion point
+/// are untouched.
+///
+/// Note: inserting a list item right after another list of the same kind joins them into one
+/// Markdown list.
+pub fn insert_block(
+    body: &str,
+    after: Option<&BlockRef>,
+    markdown: &str,
+) -> Result<String, VaultError> {
+    let eol = eol_of(body);
+    let unix = markdown.replace("\r\n", "\n");
+    let trimmed = unix.trim_matches(['\n', '\r']);
+    if trimmed.trim().is_empty() {
+        return Err(VaultError::Block(
+            "inserted markdown must not be empty".into(),
+        ));
+    }
+    let text = if eol == "\n" {
+        trimmed.to_string()
+    } else {
+        trimmed.replace('\n', eol)
+    };
+    let blocks = parse_blocks(body);
+    let idx = match after {
+        Some(r) => Some(resolve(&blocks, r)?.index),
+        None => None,
+    };
+    Ok(insert_raw(body, &blocks, idx, &text))
+}
+
+/// Byte range removed when deleting `blocks[idx]`: the block, its line ending and one blank
+/// line after it; for the last block, the blank line(s) before it instead.
+fn delete_range(body: &str, blocks: &[Block], idx: usize) -> (usize, usize) {
+    let b = &blocks[idx];
+    if idx + 1 == blocks.len() && idx > 0 && body[blocks[idx - 1].end..b.start].trim().is_empty() {
+        return (blocks[idx - 1].end, b.end);
+    }
+    let mut end = b.end;
+    let rest = &body[end..];
+    let eol_len = if rest.starts_with("\r\n") {
+        2
+    } else {
+        usize::from(rest.starts_with('\n'))
+    };
+    end += eol_len;
+    if eol_len > 0 && idx + 1 < blocks.len() {
+        let rest = &body[end..];
+        let line_len = rest.find('\n').map_or(rest.len(), |p| p + 1);
+        if rest[..line_len].trim().is_empty() && end + line_len <= blocks[idx + 1].start {
+            end += line_len;
+        }
+    }
+    (b.start, end)
+}
+
+/// Remove a block and one separating blank line. Everything else is byte-identical.
+pub fn delete_block(body: &str, r: &BlockRef) -> Result<String, VaultError> {
+    let blocks = parse_blocks(body);
+    let b = resolve(&blocks, r)?;
+    let (start, end) = delete_range(body, &blocks, b.index);
+    Ok(format!("{}{}", &body[..start], &body[end..]))
+}
+
+/// Move a block so it ends up at `to_index` among the blocks that remain after it is removed
+/// (`0` = first, number of other blocks = last). The block's own bytes are preserved.
+pub fn move_block(body: &str, r: &BlockRef, to_index: usize) -> Result<String, VaultError> {
+    let blocks = parse_blocks(body);
+    let b = resolve(&blocks, r)?;
+    let others = blocks.len() - 1;
+    if to_index > others {
+        return Err(VaultError::Block(format!(
+            "move target {to_index} out of range (0..={others})"
+        )));
+    }
+    if to_index == b.index {
+        return Ok(body.to_string());
+    }
+    let (start, end) = delete_range(body, &blocks, b.index);
+    let removed = format!("{}{}", &body[..start], &body[end..]);
+    let rest = parse_blocks(&removed);
+    Ok(insert_raw(
+        &removed,
+        &rest,
+        to_index.checked_sub(1),
+        &b.text,
+    ))
+}
+
+/// If `line` is a task list item, the byte offset of the character inside its `[ ]`.
+fn task_box(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'>') {
+        i += 1;
+    }
+    match bytes.get(i)? {
+        b'-' | b'*' | b'+' => i += 1,
+        b'0'..=b'9' => {
+            while bytes.get(i).is_some_and(u8::is_ascii_digit) {
+                i += 1;
+            }
+            if !matches!(bytes.get(i)?, b'.' | b')') {
+                return None;
+            }
+            i += 1;
+        }
+        _ => return None,
+    }
+    let ws = i;
+    while bytes.get(i).is_some_and(|c| matches!(c, b' ' | b'\t')) {
+        i += 1;
+    }
+    if i == ws || *bytes.get(i)? != b'[' || *bytes.get(i + 2)? != b']' {
+        return None;
+    }
+    let ok_after = bytes
+        .get(i + 3)
+        .is_none_or(|c| matches!(c, b' ' | b'\t' | b'\r' | b'\n'));
+    (matches!(bytes[i + 1], b' ' | b'x' | b'X') && ok_after).then_some(i + 1)
+}
+
+/// Flip `[ ]` and `[x]` on one line of a block (`line` is 0-based within the block).
+pub fn toggle_task_item(body: &str, r: &BlockRef, line: usize) -> Result<String, VaultError> {
+    let blocks = parse_blocks(body);
+    let b = resolve(&blocks, r)?;
+    let mut offset = 0;
+    for (n, l) in b.text.split_inclusive('\n').enumerate() {
+        if n == line {
+            let pos = task_box(l).ok_or_else(|| {
+                VaultError::Block(format!("line {line} of the block is not a task item"))
+            })?;
+            let at = b.start + offset + pos;
+            let flipped = if body.as_bytes()[at] == b' ' {
+                'x'
+            } else {
+                ' '
+            };
+            let mut out = String::with_capacity(body.len());
+            out.push_str(&body[..at]);
+            out.push(flipped);
+            out.push_str(&body[at + 1..]);
+            return Ok(out);
+        }
+        offset += l.len();
+    }
+    Err(VaultError::Block(format!(
+        "line {line} out of range for the block"
+    )))
+}
+
+/// Markdown skeleton for a slash-menu block type, or `None` for an unknown type.
+pub fn block_template(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "text" => "",
+        "h1" => "# ",
+        "h2" => "## ",
+        "h3" => "### ",
+        "bullet" => "- ",
+        "numbered" => "1. ",
+        "todo" => "- [ ] ",
+        "toggle" => "> [!note]- Toggle\n> ",
+        "quote" => "> ",
+        "callout" => "> [!note] Note\n> ",
+        "code" => "```\n\n```",
+        "divider" => "---",
+        "image" => "![]()",
+        "file" => "[file]()",
+        "embed" => "![[]]",
+        "table" => "| Column | Column |\n| --- | --- |\n|  |  |",
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
