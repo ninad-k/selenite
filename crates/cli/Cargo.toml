@@ -18,6 +18,7 @@ selenite-core = { workspace = true }
 selenite-index = { workspace = true }
 selenite-reminders = { workspace = true }
 selenite-mcp = { workspace = true }
+selenite-import = { workspace = true }
 selenite-vault = { workspace = true }
 selenite-storage = { workspace = true }
 selenite-sync = { workspace = true }
