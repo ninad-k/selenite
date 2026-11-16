@@ -26,10 +26,11 @@
 | `core` | Domain model, `VaultPath` (validated, `/`-separated, cannot escape the vault), modes, product name | — |
 | `vault` | Parse/serialise Markdown + front matter; extract wikilinks, tags, headings; layout rules (daily notes, config) | core |
 | `storage` | `StorageProvider` trait; `LocalFolder`; later `GoogleDrive`, `OneDrive`; atomic writes, revisions | core |
-| `index` | SQLite + FTS5: pages, links, backlinks, tags, properties, tasks, search; rebuild from a provider | core, vault, storage |
+| `index` | SQLite + FTS5: pages, links, backlinks, tags, properties, tasks, search, passages and cited retrieval (`Engine::ask`); audit log; rebuild from a provider | core, vault, storage |
 | `sync` | Manifest (path, hash, etag, mtime), two-way sync, conflict copies, offline queue | core, storage |
 | `reminders` | 7-day planner over indexed tasks; OS notification adapters | core |
 | `mcp` | MCP tools/resources over the engine; stdio + Streamable HTTP; audit log | core, vault, storage, index |
+| `plugins` | Plugin manifests, enablement, permission-checked host for sandboxed plugin calls (Phase 7) | core, vault, storage, index |
 | `cli` | `selenite` binary | all engine crates |
 | `apps/desktop` | Tauri 2 shell + TypeScript UI (CodeMirror 6 editor) | engine crates |
 | `apps/server` | Headless sync + reminders + MCP over HTTP | engine crates |
@@ -91,6 +92,8 @@ files to `.selenite/trash/`.
 - Tauri capabilities are minimal; the UI cannot touch the filesystem directly.
 - Logs carry paths and counts only, never note content or tokens.
 - OAuth tokens (Phase 5) go to the OS keychain only.
+- Plugins (Phase 7) run only in sandboxed iframes and reach the vault through the permission-checked
+  Rust host; see `docs/plugins.md`.
 
 ## Cloud storage and sync (Phase 5)
 

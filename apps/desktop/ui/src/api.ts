@@ -31,6 +31,33 @@ export interface SearchHit {
   title: string;
   snippet: string;
 }
+export interface Citation {
+  path: string;
+  title: string;
+  heading: string | null;
+  start_line: number;
+  end_line: number;
+  excerpt: string;
+  score: number;
+}
+export type PluginPermission = "read" | "write" | "commands";
+export interface PluginInfo {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  permissions: PluginPermission[];
+  enabled: boolean;
+  /** Enabled once, but its files changed since: it will not run until enabled again. */
+  changed: boolean;
+  error: string | null;
+}
+export interface PluginSource {
+  id: string;
+  name: string;
+  source: string;
+  permissions: PluginPermission[];
+}
 export interface Backlink {
   source: string;
   source_title: string;
@@ -257,6 +284,13 @@ export const api = {
   createPageAt: (path: string) => invoke<string>("create_page_at", { path }),
   resolve: (target: string) => invoke<string | null>("resolve", { target }),
   search: (query: string, limit: number) => invoke<SearchHit[]>("search", { query, limit }),
+  ask: (question: string, limit: number) => invoke<Citation[]>("ask", { question, limit }),
+  pluginList: () => invoke<PluginInfo[]>("plugin_list"),
+  pluginSetEnabled: (id: string, enabled: boolean) =>
+    invoke<void>("plugin_set_enabled", { id, enabled }),
+  pluginLoad: (id: string) => invoke<PluginSource>("plugin_load", { id }),
+  pluginCall: (pluginId: string, method: string, args: Record<string, unknown>) =>
+    invoke<unknown>("plugin_call", { pluginId, method, args }),
   backlinks: (path: string) => invoke<Backlink[]>("backlinks", { path }),
   outgoing: (path: string) => invoke<OutLink[]>("outgoing", { path }),
   tags: () => invoke<TagCount[]>("tags"),

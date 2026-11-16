@@ -591,3 +591,52 @@ fn broken_plugins_are_listed_with_an_error_and_cannot_be_enabled() {
         assert!(set_enabled(&e, id, true).is_err(), "enabled {id}");
     }
 }
+
+#[test]
+fn the_word_count_example_is_a_valid_plugin_and_works_end_to_end() {
+    let manifest = include_str!("../../../examples/plugins/word-count/manifest.json");
+    let main_js = include_str!("../../../examples/plugins/word-count/main.js");
+    let parsed = crate::Manifest::parse(manifest).expect("example manifest");
+    assert_eq!(parsed.id, "word-count");
+    assert_eq!(
+        parsed.permissions,
+        vec![Permission::Read, Permission::Commands]
+    );
+    assert!(main_js.contains("selenite.vault.read"));
+
+    let (_d, mut e) = vault();
+    put(&e, ".selenite/plugins/word-count/manifest.json", manifest);
+    put(&e, ".selenite/plugins/word-count/main.js", main_js);
+    assert!(!discover(&e).expect("discover")[0].enabled);
+    set_enabled(&e, "word-count", true).expect("enable");
+    let mut host = PluginHost::new();
+    let cmd = call(
+        &mut host,
+        &mut e,
+        "word-count",
+        "ui.registerCommand",
+        json!({"id": "count", "title": "Count words in this page"}),
+    )
+    .expect("register");
+    assert_eq!(cmd["id"], "count");
+    let page = call(
+        &mut host,
+        &mut e,
+        "word-count",
+        "vault.read",
+        json!({"path": "Welcome.md"}),
+    )
+    .expect("read");
+    assert!(page["text"].as_str().expect("text").contains("Welcome"));
+    // It asked for read and commands only: writing is refused.
+    assert!(
+        call(
+            &mut host,
+            &mut e,
+            "word-count",
+            "vault.createPage",
+            json!({"title": "X", "markdown": "x"})
+        )
+        .is_err()
+    );
+}
