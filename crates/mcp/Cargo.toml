@@ -9,6 +9,24 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[[bin]]
+name = "selenite-mcp-stdio"
+path = "src/bin/stdio.rs"
+
 [dependencies]
 selenite-core = { workspace = true }
+selenite-vault = { workspace = true }
+selenite-storage = { workspace = true }
+selenite-index = { workspace = true }
+rmcp = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
+blake3 = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
