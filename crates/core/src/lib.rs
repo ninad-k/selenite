@@ -4,9 +4,15 @@
 
 pub mod mode;
 pub mod path;
+pub mod quickadd;
+pub mod recurrence;
+pub mod task;
 
 pub use mode::{Mode, ModeNames};
 pub use path::{PathError, VaultPath};
+pub use quickadd::{QuickAdd, parse_quick_add};
+pub use recurrence::{Freq, Recurrence, RecurrenceError};
+pub use task::{Due, Priority, ReminderSpec, TASK_KEYS, TaskError, TaskFields};
 
 /// The product name. Change this (plus the desktop bundle config) to rename the product.
 pub const APP_NAME: &str = "Selenite";
