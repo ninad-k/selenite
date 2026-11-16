@@ -18,4 +18,4 @@ Target: full capability parity over time. Update status in the same commit that 
 | Full-text search with operators | Search note content with operators for tags, paths, properties and exact phrases. | partial | 1 |
 | File tree | Browse and manage vault folders and files in a sidebar tree that mirrors disk. | done | 1 |
 | Canvas | Arrange notes, files and cards spatially on an infinite board linked to vault files. | todo | 7 |
-| Plugin API | Let third parties add commands, views and processors through a stable, versioned API. | todo | 7 |
+| Plugin API | Let third parties add commands, views and processors through a stable, versioned API. | partial | 7 |
