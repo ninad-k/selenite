@@ -85,6 +85,9 @@ pub struct LinkRecord {
     pub context: String,
 }
 
+/// A page in a folder with its front matter properties as `(key, JSON value)`.
+pub type FolderRow = (PageSummary, Vec<(String, String)>);
+
 /// Short description of an indexed page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageSummary {
@@ -508,7 +511,7 @@ impl Index {
 
     /// Pages directly inside `folder` (not nested deeper) with their front matter properties
     /// as `(key, JSON value)`, ordered by path. `folder` is vault-relative; empty for the root.
-    pub fn folder_rows(&self, folder: &str) -> Result<Vec<(PageSummary, Vec<(String, String)>)>> {
+    pub fn folder_rows(&self, folder: &str) -> Result<Vec<FolderRow>> {
         let prefix = if folder.is_empty() {
             String::new()
         } else {

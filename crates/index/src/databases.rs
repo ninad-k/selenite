@@ -116,6 +116,9 @@ fn millis_to_datetime(ms: i64) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// A related database's definition and its rows' stored values by path.
+type RelatedDb = (DatabaseDef, HashMap<VaultPath, BTreeMap<String, Value>>);
+
 /// Raw (uncoerced) row data loaded from the index.
 struct RawRow {
     path: VaultPath,
@@ -275,10 +278,7 @@ impl Engine {
             })
             .collect();
         // Related databases' stored values, loaded once per target folder.
-        let mut related: HashMap<
-            String,
-            (DatabaseDef, HashMap<VaultPath, BTreeMap<String, Value>>),
-        > = HashMap::new();
+        let mut related: HashMap<String, RelatedDb> = HashMap::new();
 
         let mut rows = Vec::new();
         for raw in self.raw_rows(folder)? {
