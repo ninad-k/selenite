@@ -42,9 +42,10 @@ impl VaultPath {
             if seg.is_empty() || seg == "." || seg == ".." {
                 return Err(PathError::BadComponent);
             }
-            if seg.chars().any(|c| {
-                c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*')
-            }) {
+            if seg
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+            {
                 return Err(PathError::BadChar);
             }
         }
@@ -143,7 +144,11 @@ mod tests {
 
     #[test]
     fn hidden_detection() {
-        assert!(VaultPath::new(".selenite/index.sqlite").unwrap().is_hidden());
+        assert!(
+            VaultPath::new(".selenite/index.sqlite")
+                .unwrap()
+                .is_hidden()
+        );
         assert!(!VaultPath::new("notes/a.md").unwrap().is_hidden());
     }
 
