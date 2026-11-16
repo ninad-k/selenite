@@ -12,3 +12,7 @@ workspace = true
 [dependencies]
 selenite-core = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_norway = { workspace = true }
+pulldown-cmark = { workspace = true }
+chrono = { workspace = true }
