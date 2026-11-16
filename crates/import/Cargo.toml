@@ -1,0 +1,26 @@
+[package]
+name = "selenite-import"
+description = "Importers for Obsidian vaults, Notion exports and Todoist CSV files."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+selenite-core = { workspace = true }
+selenite-vault = { workspace = true }
+selenite-storage = { workspace = true }
+selenite-index = { workspace = true }
+chrono = { workspace = true }
+csv = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+walkdir = { workspace = true }
+zip = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
