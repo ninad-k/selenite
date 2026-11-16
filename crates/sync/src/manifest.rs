@@ -122,7 +122,8 @@ impl Manifest {
 /// Whether a path takes part in sync.
 ///
 /// Excluded: the index cache (`.selenite/index.sqlite*`), sync state (`.selenite/sync/**`),
-/// temporary files (`*.selenite-tmp-*`) and OS junk. Everything else is synced, including
+/// the per-device plugin enablement record (`.selenite/plugins/enabled.json`), temporary files
+/// (`*.selenite-tmp-*`) and OS junk. Everything else is synced, including
 /// `.selenite/config.yaml`, `.selenite/audit/**`, `.selenite/trash/**` (trash is user data) and
 /// `.obsidian/**`.
 pub fn is_synced(path: &str) -> bool {
@@ -130,6 +131,10 @@ pub fn is_synced(path: &str) -> bool {
         return false;
     }
     if path.starts_with(".selenite/index.sqlite") {
+        return false;
+    }
+    // Which plugins run is a per-device decision; a remote must never be able to enable one.
+    if path == ".selenite/plugins/enabled.json" {
         return false;
     }
     let name = path.rsplit('/').next().unwrap_or(path);
@@ -153,6 +158,7 @@ mod tests {
             ".selenite/index.sqlite-wal",
             ".selenite/index.sqlite-shm",
             ".selenite/sync/remote.json",
+            ".selenite/plugins/enabled.json",
             ".selenite/sync/queue.json",
             "a/b.md.selenite-tmp-123",
             ".DS_Store",

@@ -4163,6 +4163,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "selenite-plugins"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "selenite-core",
+ "selenite-index",
+ "selenite-storage",
+ "selenite-vault",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "selenite-reminders"
 version = "0.1.0"
 dependencies = [
