@@ -1,0 +1,8 @@
+/target/
+**/node_modules/
+**/dist/
+apps/desktop/src-tauri/gen/
+*.selenite-tmp
+.selenite/index.sqlite*
+.DS_Store
+Thumbs.db

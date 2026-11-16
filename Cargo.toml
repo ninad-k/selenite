@@ -1,0 +1,72 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/vault",
+    "crates/storage",
+    "crates/index",
+    "crates/sync",
+    "crates/reminders",
+    "crates/mcp",
+    "crates/cli",
+    "apps/server",
+    "apps/desktop/src-tauri",
+]
+default-members = [
+    "crates/core",
+    "crates/vault",
+    "crates/storage",
+    "crates/index",
+    "crates/sync",
+    "crates/reminders",
+    "crates/mcp",
+    "crates/cli",
+    "apps/server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+# Licence intentionally unset: open question for the owner (docs/open-questions.md).
+
+[workspace.dependencies]
+selenite-core = { path = "crates/core" }
+selenite-vault = { path = "crates/vault" }
+selenite-storage = { path = "crates/storage" }
+selenite-index = { path = "crates/index" }
+selenite-sync = { path = "crates/sync" }
+selenite-reminders = { path = "crates/reminders" }
+selenite-mcp = { path = "crates/mcp" }
+
+thiserror = "2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_norway = "0.9"
+rusqlite = { version = "0.43", features = ["bundled"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+clap = { version = "4.6", features = ["derive"] }
+tempfile = "3"
+walkdir = "2"
+blake3 = "1.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+criterion = "0.8"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+dbg_macro = "deny"
+todo = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
