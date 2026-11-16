@@ -135,6 +135,7 @@ struct Inner {
 #[derive(Clone)]
 pub struct VaultMcp {
     inner: Arc<Inner>,
+    transport: &'static str,
     tool_router: ToolRouter<VaultMcp>,
 }
 
@@ -621,8 +622,30 @@ impl VaultMcp {
                 engine: Mutex::new(engine),
                 audit: AuditLog::new(),
             }),
+            transport: "stdio",
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// A handle to the same engine whose audit entries record `transport` (`"stdio"` is the
+    /// default, the HTTP server uses `"http"`).
+    #[must_use]
+    pub fn with_transport(mut self, transport: &'static str) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// Bring the index up to date with files changed outside the engine (for example by sync).
+    /// Holds the engine lock only for the refresh itself. Returns `(added, updated, removed)`
+    /// page counts.
+    pub async fn refresh_index(&self) -> Result<(usize, usize, usize), String> {
+        self.blocking(|eng, _| {
+            eng.refresh()
+                .map(|s| (s.added, s.updated, s.removed))
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|f| f.message)?
     }
 
     /// The newest `limit` audit entries, oldest first (used by tests and the CLI).
@@ -680,6 +703,7 @@ impl VaultMcp {
         F: FnOnce(&mut Engine, &mut Trace) -> ToolResult<Value> + Send + 'static,
     {
         let digest = args_digest(&serde_json::to_value(args).unwrap_or(Value::Null));
+        let transport = self.transport;
         let outcome = self
             .blocking(move |eng, audit| {
                 let mut trace = Trace::default();
@@ -693,6 +717,7 @@ impl VaultMcp {
                     revision_before: trace.before,
                     revision_after: trace.after,
                     args_digest: digest,
+                    transport: Some(transport.to_string()),
                 };
                 let logged = audit.record(eng, &entry);
                 (result, logged)

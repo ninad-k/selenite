@@ -44,6 +44,10 @@ pub struct AuditEntry {
     pub revision_after: Option<String>,
     /// blake3 hex digest of the canonical JSON of the call's arguments.
     pub args_digest: String,
+    /// Transport the call arrived on: `stdio` or `http`. Absent in entries written before the
+    /// field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
 }
 
 /// The audit log. Stateless: each call writes into the vault of the engine it is given.

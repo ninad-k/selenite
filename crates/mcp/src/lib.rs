@@ -5,14 +5,25 @@
 //! trash. Every write tool call is recorded in `.selenite/audit/mcp-YYYY-MM.jsonl` (see
 //! [`audit`]); the log holds paths, revisions and an argument digest, never content.
 //!
-//! Transport: stdio ([`serve_stdio`], [`run_stdio`]). Streamable HTTP arrives with the headless
-//! server. On stdio, stdout is the protocol channel, so nothing here may print to it; logs go
+//! Transports: stdio ([`serve_stdio`], [`run_stdio`]) and Streamable HTTP
+//! ([`streamable_http_service`], mounted and authenticated by the headless `selenite-server`).
+//! Audit entries record which one a call used. On stdio, stdout is the protocol channel, so nothing here may print to it; logs go
 //! to stderr.
 
 pub mod audit;
 mod server;
 
-use rmcp::{ServiceExt, transport::stdio};
+use std::sync::Arc;
+
+use rmcp::{
+    ServiceExt,
+    transport::{
+        stdio,
+        streamable_http_server::{
+            StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+        },
+    },
+};
 use selenite_index::Engine;
 
 pub use audit::{AuditEntry, AuditLog};
@@ -61,3 +72,23 @@ pub fn run_stdio(engine: Engine) -> Result<(), McpError> {
         .map_err(|e| McpError::Runtime(e.to_string()))?;
     runtime.block_on(serve_stdio(engine))
 }
+
+/// The Streamable HTTP service for `vault`: a `tower` service to mount at `/mcp`.
+///
+/// Every session gets a clone of `vault` (so one engine, serialised by its lock, serves all
+/// sessions) tagged with the `http` audit transport. The service itself does no
+/// authentication: the caller must put authentication in front of it.
+pub fn streamable_http_service(
+    vault: &VaultMcp,
+    config: StreamableHttpServerConfig,
+) -> StreamableHttpService<VaultMcp, LocalSessionManager> {
+    let vault = vault.clone().with_transport("http");
+    StreamableHttpService::new(
+        move || Ok(vault.clone()),
+        Arc::new(LocalSessionManager::default()),
+        config,
+    )
+}
+
+/// Re-exported so callers can name the HTTP configuration without depending on `rmcp`.
+pub use rmcp::transport::streamable_http_server::StreamableHttpServerConfig as HttpConfig;
