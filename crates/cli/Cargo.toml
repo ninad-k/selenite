@@ -17,6 +17,7 @@ path = "src/main.rs"
 selenite-core = { workspace = true }
 selenite-index = { workspace = true }
 selenite-reminders = { workspace = true }
+selenite-mcp = { workspace = true }
 selenite-vault = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }

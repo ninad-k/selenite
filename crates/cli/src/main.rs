@@ -84,6 +84,8 @@ enum Command {
     },
     /// Drop the index and rebuild it from the vault files.
     RebuildIndex,
+    /// Serve the vault to AI agents over MCP (stdio). Logs go to stderr.
+    Mcp,
     /// Sync with other devices (not available yet).
     Sync,
     /// Import notes from another app (not available yet).
@@ -385,6 +387,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
             } else {
                 println!("Indexed {pages} pages");
             }
+        }
+        Command::Mcp => {
+            let engine = open()?;
+            selenite_mcp::run_stdio(engine)?;
         }
         Command::Sync => {
             eprintln!("error: {APP_NAME} sync is not available until a later phase");
