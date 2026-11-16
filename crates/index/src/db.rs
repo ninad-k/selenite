@@ -41,6 +41,31 @@ pub struct PageRecord {
     pub links: Vec<LinkRecord>,
     /// Front matter properties as `(key, JSON value)`.
     pub properties: Vec<(String, String)>,
+    /// Task data, if the page is a row of a Tasks database.
+    pub task: Option<TaskRecord>,
+}
+
+/// Task columns stored for a task row. The full fields are kept as JSON so the index does not
+/// depend on the task model's internals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRecord {
+    /// Whether the task is completed.
+    pub done: bool,
+    /// Due date/time as `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` (sortable).
+    pub due: Option<String>,
+    /// Project path, `None` for the Inbox.
+    pub project: Option<String>,
+    /// Full task fields as JSON.
+    pub fields_json: String,
+}
+
+/// A task row read back from the index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRow {
+    /// Path of the task file.
+    pub path: VaultPath,
+    /// Full task fields as JSON.
+    pub fields_json: String,
 }
 
 /// One outgoing link stored in the index.
@@ -481,6 +506,39 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Read a value from the index metadata table.
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// Store a value in the index metadata table.
+    pub fn set_meta(&mut self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// All task rows, optionally only open ones, ordered by due (undated last) then path.
+    pub fn task_rows(&self, open_only: bool) -> Result<Vec<TaskRow>> {
+        let sql = format!(
+            "SELECT p.path, t.fields FROM tasks t JOIN pages p ON p.id = t.page_id {}              ORDER BY t.due IS NULL, t.due, p.path",
+            if open_only { "WHERE t.done = 0" } else { "" }
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |r| {
+            Ok(TaskRow {
+                path: to_path(r.get(0)?)?,
+                fields_json: r.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Run a search (see [`SearchQuery`] for syntax). Results are best-first.
     pub fn search(&self, input: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let q = SearchQuery::parse(input);
@@ -619,6 +677,12 @@ fn upsert_in(tx: &rusqlite::Transaction<'_>, rec: &PageRecord) -> Result<()> {
         for (k, v) in &rec.properties {
             stmt.execute(params![id, k, v])?;
         }
+    }
+    if let Some(t) = &rec.task {
+        tx.execute(
+            "INSERT INTO tasks (page_id, done, due, project, fields) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, t.done, t.due, t.project, t.fields_json],
+        )?;
     }
     Ok(())
 }

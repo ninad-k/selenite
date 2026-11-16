@@ -3,6 +3,7 @@
 //! It owns a [`StorageProvider`] (the source of truth) and an [`Index`] (a cache), and keeps the
 //! index in step with every write it performs.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -11,7 +12,10 @@ use selenite_storage::{
     Entry, LocalFolder, Revision, StorageError, StorageProvider, WriteMode, content_hash,
 };
 use selenite_vault::config::CONFIG_PATH;
-use selenite_vault::{Document, VaultConfig, VaultError, extract_links, layout};
+use selenite_vault::{
+    DatabaseKind, DatabaseSchema, Document, SCHEMA_FILE, VaultConfig, VaultError, extract_links,
+    layout,
+};
 use serde::Serialize;
 
 use crate::db::{
@@ -40,10 +44,16 @@ pub enum EngineError {
     /// The file is not valid UTF-8 text.
     #[error("not UTF-8 text: {0}")]
     NotUtf8(VaultPath),
+    /// A task operation failed.
+    #[error("task error: {0}")]
+    Task(String),
     /// The folder is already a vault (on init) or is not usable as one.
     #[error("{0}")]
     NotAVault(String),
 }
+
+/// Index metadata key holding the Tasks database folders the index was built with.
+const TASK_DBS_KEY: &str = "task_dbs";
 
 /// Result alias for engine operations.
 pub type Result<T> = std::result::Result<T, EngineError>;
@@ -78,6 +88,7 @@ pub struct Engine {
     index: Index,
     config: VaultConfig,
     root: Option<PathBuf>,
+    pub(crate) task_dbs: BTreeSet<String>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -100,9 +111,14 @@ fn millis(e: &Entry) -> i64 {
         .unwrap_or(0)
 }
 
-/// Build the index record for one page.
-pub fn page_record(path: &VaultPath, text: &str, entry: &Entry) -> PageRecord {
+/// Build the index record for one page. `is_task` marks rows of a Tasks database.
+pub fn page_record(path: &VaultPath, text: &str, entry: &Entry, is_task: bool) -> PageRecord {
     let doc = Document::parse(text);
+    let task = if is_task {
+        crate::tasks::task_fields_from_document(&doc, path).map(|f| crate::tasks::task_record(&f))
+    } else {
+        None
+    };
     let body = doc.body();
     let lines: Vec<&str> = body.lines().collect();
     let links = extract_links(body)
@@ -139,6 +155,7 @@ pub fn page_record(path: &VaultPath, text: &str, entry: &Entry) -> PageRecord {
         tags: doc.tags(),
         links,
         properties,
+        task,
     }
 }
 
@@ -206,6 +223,7 @@ impl Engine {
                 engine.rebuild_index()?;
             }
             OpenStatus::Ready => {
+                engine.task_dbs = engine.load_task_dbs()?;
                 engine.refresh()?;
             }
         }
@@ -234,6 +252,7 @@ impl Engine {
             index,
             config,
             root: None,
+            task_dbs: BTreeSet::new(),
         })
     }
 
@@ -268,13 +287,72 @@ impl Engine {
         self.storage.as_ref()
     }
 
-    fn page_entries(&self) -> Result<Vec<Entry>> {
+    /// List pages and, from the same listing, the set of Tasks database folders.
+    fn scan(&self) -> Result<(Vec<Entry>, BTreeSet<String>)> {
+        let all = self.storage.list()?;
+        let mut dbs = BTreeSet::new();
+        for e in &all {
+            if e.path.file_name() == SCHEMA_FILE && !e.path.is_hidden() {
+                let Ok(text) = self.read_text(&e.path) else {
+                    continue;
+                };
+                match DatabaseSchema::from_yaml(&text) {
+                    Ok(schema) if schema.kind == DatabaseKind::Tasks => {
+                        dbs.insert(e.path.parent().unwrap_or("").to_string());
+                    }
+                    Ok(_) => {}
+                    Err(_) => tracing::warn!(path = %e.path, "unreadable database schema"),
+                }
+            }
+        }
+        let pages = all
+            .into_iter()
+            .filter(|e| layout::is_page(&e.path))
+            .collect();
+        Ok((pages, dbs))
+    }
+
+    pub(crate) fn store_task_dbs(&mut self) -> Result<()> {
+        let list: Vec<&String> = self.task_dbs.iter().collect();
+        let json = serde_json::to_string(&list).map_err(|e| EngineError::Task(e.to_string()))?;
+        self.index.set_meta(TASK_DBS_KEY, &json)?;
+        Ok(())
+    }
+
+    fn load_task_dbs(&self) -> Result<BTreeSet<String>> {
         Ok(self
+            .index
+            .meta(TASK_DBS_KEY)?
+            .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .collect())
+    }
+
+    /// Re-index the pages directly inside `folder` (after it became or stopped being a database).
+    pub(crate) fn reindex_folder(&mut self, folder: &str) -> Result<()> {
+        let entries: Vec<Entry> = self
             .storage
             .list()?
             .into_iter()
-            .filter(|e| layout::is_page(&e.path))
-            .collect())
+            .filter(|e| layout::is_page(&e.path) && e.path.parent().unwrap_or("") == folder)
+            .collect();
+        let mut records = Vec::with_capacity(entries.len());
+        for e in &entries {
+            if let Ok(text) = self.read_text(&e.path) {
+                records.push(self.record(&e.path, &text, e));
+            }
+        }
+        self.index.upsert_many(records.iter())?;
+        Ok(())
+    }
+
+    fn is_task_path(&self, path: &VaultPath) -> bool {
+        self.task_dbs.contains(path.parent().unwrap_or(""))
+    }
+
+    fn record(&self, path: &VaultPath, text: &str, entry: &Entry) -> PageRecord {
+        page_record(path, text, entry, self.is_task_path(path))
     }
 
     fn read_text(&self, path: &VaultPath) -> Result<String> {
@@ -284,11 +362,12 @@ impl Engine {
 
     /// Drop and rebuild the whole index from the files. Returns the number of pages indexed.
     pub fn rebuild_index(&mut self) -> Result<usize> {
-        let entries = self.page_entries()?;
+        let (entries, dbs) = self.scan()?;
+        self.task_dbs = dbs;
         let mut records = Vec::with_capacity(entries.len());
         for e in &entries {
             match self.read_text(&e.path) {
-                Ok(text) => records.push(page_record(&e.path, &text, e)),
+                Ok(text) => records.push(self.record(&e.path, &text, e)),
                 Err(EngineError::NotUtf8(p)) => {
                     tracing::warn!(path = %p, "skipping non-UTF-8 page");
                 }
@@ -297,16 +376,26 @@ impl Engine {
         }
         self.index.clear()?;
         let n = self.index.upsert_many(records.iter())?;
+        self.store_task_dbs()?;
         tracing::info!(pages = n, "index rebuilt");
         Ok(n)
     }
 
     /// Bring the index up to date with files changed outside the engine.
     pub fn refresh(&mut self) -> Result<RefreshStats> {
+        let (entries, dbs) = self.scan()?;
+        if dbs != self.task_dbs {
+            // A database appeared or disappeared: row classification changed everywhere.
+            let added = self.rebuild_index()?;
+            return Ok(RefreshStats {
+                added,
+                ..RefreshStats::default()
+            });
+        }
         let mut states = self.index.page_states()?;
         let mut stats = RefreshStats::default();
         let mut records = Vec::new();
-        for e in self.page_entries()? {
+        for e in entries {
             match states.remove(&e.path) {
                 Some((_, rev)) if rev == e.revision.0 => {}
                 Some((hash, _)) => {
@@ -317,7 +406,7 @@ impl Engine {
                         self.index
                             .touch_revision(&e.path, &e.revision.0, millis(&e))?;
                     } else {
-                        records.push(page_record(&e.path, &text, &e));
+                        records.push(self.record(&e.path, &text, &e));
                         stats.updated += 1;
                     }
                 }
@@ -325,7 +414,7 @@ impl Engine {
                     let Ok(text) = self.read_text(&e.path) else {
                         continue;
                     };
-                    records.push(page_record(&e.path, &text, &e));
+                    records.push(self.record(&e.path, &text, &e));
                     stats.added += 1;
                 }
             }
@@ -357,7 +446,8 @@ impl Engine {
     }
 
     fn reindex(&mut self, path: &VaultPath, text: &str, entry: &Entry) -> Result<()> {
-        self.index.upsert(&page_record(path, text, entry))?;
+        let rec = self.record(path, text, entry);
+        self.index.upsert(&rec)?;
         Ok(())
     }
 
