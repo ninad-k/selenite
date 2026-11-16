@@ -11,10 +11,15 @@
 mod engine;
 mod manifest;
 mod queue;
+pub mod remote;
 
 pub use engine::{ConflictInfo, SyncReport, sync};
 pub use manifest::{ConflictState, Manifest, ManifestEntry, is_synced};
 pub use queue::{OfflineQueue, is_offline, pending};
+pub use remote::{
+    ConflictSummary, Provider, RemoteConfig, RemoteError, RemotesFile, ReportSummary,
+    client_config, keychain_store, now_secs, open_remote, sign_in,
+};
 
 use selenite_storage::StorageError;
 

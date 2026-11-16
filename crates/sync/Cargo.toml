@@ -15,6 +15,7 @@ selenite-storage = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_norway = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 
