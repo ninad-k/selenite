@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, MutexGuard};
 
 use selenite_index::Engine;
+use selenite_plugins::PluginHost;
 use selenite_reminders::{MemoryNotifier, Notifier};
 use selenite_storage::StorageProvider;
 use selenite_sync::{ConflictSummary, RemoteConfig, keychain_store};
@@ -110,6 +111,8 @@ pub struct AppState {
     pub sync: Mutex<SyncBook>,
     /// True while a sync run is in flight (runs never overlap).
     pub sync_running: AtomicBool,
+    /// Serves calls from sandboxed plugins (permission checks, rate limits, audit).
+    pub plugins: Mutex<PluginHost>,
 }
 
 impl fmt::Debug for AppState {
@@ -144,6 +147,7 @@ impl AppState {
             remotes: Box::new(KeychainRemotes),
             sync: Mutex::new(SyncBook::default()),
             sync_running: AtomicBool::new(false),
+            plugins: Mutex::new(PluginHost::new()),
         }
     }
 

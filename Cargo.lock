@@ -4111,6 +4111,7 @@ dependencies = [
  "chrono",
  "selenite-core",
  "selenite-index",
+ "selenite-plugins",
  "selenite-reminders",
  "selenite-storage",
  "selenite-sync",
