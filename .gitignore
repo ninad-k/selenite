@@ -1,7 +1,7 @@
 /target/
 **/node_modules/
 **/dist/
-apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/gen/schemas/
 *.selenite-tmp
 .selenite/index.sqlite*
 .DS_Store
