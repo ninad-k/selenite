@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" rx="224" fill="#6b7fd7"/>
+  <defs>
+    <mask id="c">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <circle cx="610" cy="430" r="270" fill="#000"/>
+    </mask>
+  </defs>
+  <circle cx="480" cy="520" r="300" fill="#eef0fb" mask="url(#c)"/>
+  <circle cx="720" cy="720" r="34" fill="#eef0fb" opacity="0.8"/>
+</svg>
