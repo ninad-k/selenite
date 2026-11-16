@@ -1,0 +1,63 @@
+//! SQLite schema for the index. Bump [`crate::INDEX_VERSION`] with every change.
+
+/// Full schema, applied to an empty database.
+pub(crate) const SCHEMA: &str = r#"
+CREATE TABLE pages (
+    id          INTEGER PRIMARY KEY,
+    path        TEXT NOT NULL UNIQUE,
+    path_norm   TEXT NOT NULL,
+    stem_norm   TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    hash        TEXT NOT NULL,
+    revision    TEXT NOT NULL,
+    size        INTEGER NOT NULL,
+    modified_ms INTEGER NOT NULL
+);
+CREATE INDEX pages_stem ON pages(stem_norm);
+CREATE INDEX pages_path_norm ON pages(path_norm);
+
+CREATE TABLE aliases (
+    page_id    INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    alias      TEXT NOT NULL,
+    alias_norm TEXT NOT NULL
+);
+CREATE INDEX aliases_norm ON aliases(alias_norm);
+CREATE INDEX aliases_page ON aliases(page_id);
+
+CREATE TABLE links (
+    id          INTEGER PRIMARY KEY,
+    source_id   INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    target      TEXT NOT NULL,
+    target_norm TEXT NOT NULL,
+    leaf_norm   TEXT NOT NULL,
+    heading     TEXT,
+    alias       TEXT,
+    embed       INTEGER NOT NULL,
+    line        INTEGER NOT NULL,
+    context     TEXT NOT NULL
+);
+CREATE INDEX links_leaf ON links(leaf_norm);
+CREATE INDEX links_source ON links(source_id);
+
+CREATE TABLE tags (
+    page_id  INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    tag      TEXT NOT NULL,
+    tag_norm TEXT NOT NULL
+);
+CREATE INDEX tags_norm ON tags(tag_norm);
+CREATE INDEX tags_page ON tags(page_id);
+
+CREATE TABLE properties (
+    page_id    INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    key        TEXT NOT NULL,
+    value_json TEXT NOT NULL
+);
+CREATE INDEX properties_page ON properties(page_id);
+CREATE INDEX properties_key ON properties(key);
+
+CREATE VIRTUAL TABLE fts USING fts5(
+    title,
+    body,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+"#;

@@ -1,15 +1,39 @@
-//! Disposable SQLite cache of links, backlinks, tags, properties, tasks and full-text search.
+//! Disposable SQLite cache of pages, links, backlinks, tags, properties and full-text search,
+//! plus the [`Engine`] facade shared by the CLI, desktop app and MCP server.
 //!
-//! The index is never synced and is always rebuildable from the vault files.
-//! Phase 0: public API placeholder. Implemented in Phase 1.
+//! The index is never synced and is always rebuildable from the vault files
+//! (`Engine::rebuild_index`).
 
-/// Schema version of the index. A mismatch triggers a full rebuild.
-pub const INDEX_VERSION: u32 = 0;
+mod db;
+pub mod engine;
+pub mod query;
+mod schema;
+
+pub use db::{
+    Backlink, HIGHLIGHT_END, HIGHLIGHT_START, Index, LinkRecord, OpenStatus, OutLink, PageRecord,
+    PageSummary, SearchHit, TagCount, UnresolvedLink,
+};
+pub use engine::{Engine, EngineError, TreeNode};
+pub use query::SearchQuery;
+
+/// Schema version of the index, stored in `PRAGMA user_version`. A mismatch rebuilds the index.
+///
+/// History: 1 = pages, aliases, links, tags, properties, fts (Phase 1).
+pub const INDEX_VERSION: u32 = 1;
+
+/// File name of the index inside the vault's app folder.
+pub const INDEX_FILE: &str = "index.sqlite";
 
 /// Errors produced by the index.
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
     /// The underlying database failed.
     #[error("database error: {0}")]
-    Db(String),
+    Db(#[from] rusqlite::Error),
+    /// A filesystem operation on the index file failed.
+    #[error("index file error: {0}")]
+    Io(String),
 }
+
+/// Result alias for index operations.
+pub type Result<T> = std::result::Result<T, IndexError>;
