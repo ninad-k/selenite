@@ -1,13 +1,21 @@
 //! The `StorageProvider` abstraction over user-owned storage.
 //!
 //! Providers: [`LocalFolder`] (a directory on disk) and [`MemoryStorage`] (in-memory, for tests).
-//! Cloud drives arrive in a later phase. Nothing in this crate logs file content.
+//! Cloud drives: [`GoogleDrive`] and [`OneDrive`] (OAuth in [`oauth`]). Nothing in this crate logs file content.
 
+mod gdrive;
 mod local;
 mod memory;
+pub mod oauth;
+mod onedrive;
+#[cfg(test)]
+mod testutil;
+mod util;
 
+pub use gdrive::GoogleDrive;
 pub use local::LocalFolder;
 pub use memory::MemoryStorage;
+pub use onedrive::OneDrive;
 pub use selenite_core::VaultPath;
 
 use std::time::SystemTime;
