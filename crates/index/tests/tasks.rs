@@ -183,3 +183,29 @@ fn archive_moves_task_to_trash() {
     assert!(e.all_tasks().unwrap().is_empty());
     assert!(dir.path().join(".selenite/trash").is_dir());
 }
+
+#[test]
+fn agenda_expands_recurring_and_lists_overdue() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut e = Engine::init_local(dir.path()).unwrap();
+    e.quick_add("stretch every day at 7am", now()).unwrap();
+    e.quick_add("report tomorrow", now()).unwrap();
+    let (late, _) = e.quick_add("late thing today", now()).unwrap();
+    e.update_task(&late, |f| {
+        f.due = Some(selenite_core::Due::date(
+            NaiveDate::from_ymd_opt(2026, 11, 10).unwrap(),
+        ))
+    })
+    .unwrap();
+    let a = e.agenda(today(), 7).unwrap();
+    assert_eq!(titles(&a.overdue), vec!["late thing"]);
+    assert_eq!(a.days.len(), 7);
+    // "every day at 7am" created at 10:00 starts tomorrow.
+    assert_eq!(titles(&a.days[1].tasks), vec!["report", "stretch"]);
+    assert!(
+        a.days
+            .iter()
+            .skip(1)
+            .all(|d| d.tasks.iter().any(|t| t.fields.title == "stretch"))
+    );
+}

@@ -22,6 +22,24 @@ pub struct TaskItem {
     pub fields: TaskFields,
 }
 
+/// One day of the agenda.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgendaDay {
+    /// The day.
+    pub date: NaiveDate,
+    /// Open tasks due that day (recurring tasks appear on every occurrence date).
+    pub tasks: Vec<TaskItem>,
+}
+
+/// The agenda for a range of days.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Agenda {
+    /// Open tasks due before the first day.
+    pub overdue: Vec<TaskItem>,
+    /// One entry per day, in order (days without tasks included).
+    pub days: Vec<AgendaDay>,
+}
+
 /// A project (or sub-project) with its open task count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProjectCount {
@@ -307,6 +325,44 @@ impl Engine {
         let filter =
             Filter::parse(expr, today).map_err(|e| EngineError::Task(format!("filter: {e}")))?;
         self.list_tasks(&filter, today)
+    }
+
+    /// Open tasks per day for `days` days starting at `from`, plus overdue tasks.
+    pub fn agenda(&self, from: NaiveDate, days: u32) -> Result<Agenda> {
+        let days = days.clamp(1, 366);
+        let to = from + chrono::Duration::days(i64::from(days) - 1);
+        let mut by_day: BTreeMap<NaiveDate, Vec<TaskItem>> = BTreeMap::new();
+        let mut overdue = Vec::new();
+        for t in self.all_tasks()? {
+            if t.fields.done {
+                continue;
+            }
+            let Some(due) = t.fields.due else { continue };
+            if due.date < from {
+                overdue.push(t.clone());
+            }
+            let dates: Vec<NaiveDate> = match &t.fields.recurrence {
+                Some(rule) => rule
+                    .occurrences(due.date, from.max(due.date), days as usize)
+                    .into_iter()
+                    .take_while(|d| *d <= to)
+                    .collect(),
+                None => vec![due.date],
+            };
+            for d in dates.into_iter().filter(|d| *d >= from && *d <= to) {
+                by_day.entry(d).or_default().push(t.clone());
+            }
+        }
+        let days = (0..i64::from(days))
+            .map(|i| {
+                let date = from + chrono::Duration::days(i);
+                AgendaDay {
+                    date,
+                    tasks: by_day.remove(&date).unwrap_or_default(),
+                }
+            })
+            .collect();
+        Ok(Agenda { overdue, days })
     }
 
     /// Projects with open-task counts (sub-projects listed separately), sorted by name.

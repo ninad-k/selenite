@@ -16,7 +16,7 @@ pub use db::{
 };
 pub use engine::{Engine, EngineError, TreeNode};
 pub use query::SearchQuery;
-pub use tasks::{ProjectCount, TaskItem};
+pub use tasks::{Agenda, AgendaDay, ProjectCount, TaskItem};
 
 /// Schema version of the index, stored in `PRAGMA user_version`. A mismatch rebuilds the index.
 ///
