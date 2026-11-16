@@ -28,8 +28,8 @@ use selenite_index::Engine;
 
 pub use audit::{AuditEntry, AuditLog};
 pub use server::{
-    AgendaParams, AppendBlocksParams, CreateDatabaseParams, CreatePageParams, CreateRowParams,
-    CreateTaskParams, DailyNoteParams, FolderParams, ListTasksParams, PathParams,
+    AgendaParams, AppendBlocksParams, AskParams, CreateDatabaseParams, CreatePageParams,
+    CreateRowParams, CreateTaskParams, DailyNoteParams, FolderParams, ListTasksParams, PathParams,
     QueryDatabaseParams, SearchParams, SetReminderParams, SetRowPropertyParams, UpdateBlockParams,
     UpdateDatabaseSchemaParams, UpdateTaskParams, VaultMcp,
 };

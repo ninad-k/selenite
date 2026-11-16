@@ -46,12 +46,16 @@ const INSTRUCTIONS: &str = "\
 A vault is a folder of Markdown pages (with optional YAML front matter) linked by [[wikilinks]] \
 and #tags. Tasks are pages too: each task is a Markdown file in a Tasks database folder, with its \
 fields (title, priority p1-p4, due, project, section, labels, reminders) in front matter. \
-Use `search` and `get_page` to read; every page read returns a `revision`. Pass that revision \
+Use `search` and `get_page` to read, or `ask_vault` for a natural-language question (it returns citable passages; answer from them only and cite [path#Lstart-Lend]); every page read returns a `revision`. Pass that revision \
 back when you write (`append_blocks`, `update_block`) so a concurrent edit is reported as a \
 conflict instead of being overwritten. Pages are edited by block (paragraph, list, heading, ...) \
 -- call `list_blocks` to see them and address a block by index or by its `^anchor`. \
 Nothing can be deleted through this server: `archive_page` and `archive_task` move items to the \
 vault trash. Every write is recorded in a local audit log (without page content).";
+
+/// Returned with every `ask_vault` result.
+const ASK_INSTRUCTIONS: &str =
+    "Answer using only these passages and cite them as [path#Lstart-Lend]";
 
 /// Public message and audit category of a failed tool call.
 struct ToolFail {
@@ -164,6 +168,17 @@ pub struct SearchParams {
     /// Full-text query. Supports `tag:name`, `path:folder`, quoted phrases and `-exclusion`.
     pub query: String,
     /// Maximum number of results (default 20, at most 100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// Parameters of `ask_vault`.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct AskParams {
+    /// The question in plain language, for example `Where do we stay in Berlin?`.
+    pub question: String,
+    /// Maximum number of passages (default 8, at most 25).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
 }
@@ -766,6 +781,24 @@ impl VaultMcp {
                     "title": h.title,
                     "snippet": clean_snippet(&h.snippet),
                 })).collect::<Vec<_>>()
+            }))
+        })
+        .await
+    }
+
+    /// Ranked, citable passages for a natural-language question.
+    #[tool(
+        description = "Find passages in the vault that answer a natural-language question. Returns ranked citations (path, title, heading, start_line, end_line, excerpt, score) and instructions. No answer is generated here: compose it yourself from the excerpts only and cite each claim as [path#Lstart-Lend].",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn ask_vault(&self, Parameters(p): Parameters<AskParams>) -> CallToolResult {
+        self.read(move |eng| {
+            let limit = p.limit.unwrap_or(8).clamp(1, 25);
+            let citations = eng.ask(&p.question, limit)?;
+            Ok(json!({
+                "question": p.question,
+                "citations": to_json(&citations)?,
+                "instructions": ASK_INSTRUCTIONS,
             }))
         })
         .await
@@ -1445,6 +1478,15 @@ note that looks like an unplanned commitment.\n\
 4. Suggest a realistic order for the day and name tasks that should move to another date.\n\
 Do not change anything until I agree; if I do, use `update_task` or `append_blocks`.";
 
+const ANSWER_WITH_CITATIONS_PROMPT: &str = "\
+Answer my question using only what my vault says.\n\
+1. Call `ask_vault` with my question (rephrase it or call it again with different wording if the \
+first passages do not cover it; use `get_page` to read more around a promising passage).\n\
+2. Write the answer from those passages only. Cite every claim as [path#Lstart-Lend] using the \
+citation's path, start_line and end_line, for example [Travel/Berlin Trip.md#L11-L11].\n\
+3. If the passages do not contain the answer, say so plainly instead of guessing.\n\
+Do not change anything in the vault.";
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for VaultMcp {
     fn get_info(&self) -> ServerConfig {
@@ -1507,11 +1549,20 @@ impl ServerHandler for VaultMcp {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, ErrorData> {
-        Ok(ListPromptsResult::with_all_items(vec![Prompt::new(
-            "daily_review",
-            Some("Review today's agenda and daily note and propose a plan for the day."),
-            None,
-        )]))
+        Ok(ListPromptsResult::with_all_items(vec![
+            Prompt::new(
+                "daily_review",
+                Some("Review today's agenda and daily note and propose a plan for the day."),
+                None,
+            ),
+            Prompt::new(
+                "answer_with_citations",
+                Some(
+                    "Answer a question from the vault only, citing passages as [path#Lstart-Lend].",
+                ),
+                None,
+            ),
+        ]))
     }
 
     async fn get_prompt(
@@ -1525,6 +1576,12 @@ impl ServerHandler for VaultMcp {
                 DAILY_REVIEW_PROMPT,
             )])
             .with_description("Daily review of agenda and daily note")
+            .into()),
+            "answer_with_citations" => Ok(GetPromptResult::new(vec![PromptMessage::new_text(
+                Role::User,
+                ANSWER_WITH_CITATIONS_PROMPT,
+            )])
+            .with_description("Answer from the vault with citations")
             .into()),
             other => Err(ErrorData::invalid_params(
                 format!("unknown prompt `{other}`"),
