@@ -131,3 +131,151 @@ fn sync_is_reserved_and_exits_with_code_2() {
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("not available until a later phase"));
 }
+
+fn json_of(out: &Output) -> serde_json::Value {
+    serde_json::from_str(&stdout(out)).unwrap()
+}
+
+#[test]
+fn task_add_recurring_rent_is_listed_with_priority_and_repeat_mark() {
+    let (_tmp, root) = new_vault();
+    let out = vault_cmd(
+        &root,
+        &["task", "add", "pay rent every 1st at 9am p1 #home"],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), "Tasks/pay rent.md");
+    assert!(root.join("Tasks").join("pay rent.md").is_file());
+
+    let out = vault_cmd(&root, &["task", "list"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("[ ] p1"), "{text}");
+    assert!(text.contains("pay rent"), "{text}");
+    assert!(text.contains("#home"), "{text}");
+    assert!(text.contains('↻'), "{text}");
+
+    let out = vault_cmd(&root, &["--json", "task", "list"]);
+    let value = json_of(&out);
+    assert_eq!(value[0]["fields"]["title"], "pay rent");
+    assert_eq!(value[0]["fields"]["priority"], 1);
+}
+
+#[test]
+fn task_list_today_shows_only_todays_task() {
+    let (_tmp, root) = new_vault();
+    vault_cmd(&root, &["task", "add", "buy milk today"]);
+    vault_cmd(&root, &["task", "add", "water plants"]);
+
+    let out = vault_cmd(&root, &["task", "list", "today"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("buy milk"), "{text}");
+    assert!(!text.contains("water plants"), "{text}");
+}
+
+#[test]
+fn task_done_then_completed_list_contains_it() {
+    let (_tmp, root) = new_vault();
+    vault_cmd(&root, &["task", "add", "buy milk today"]);
+    let out = vault_cmd(&root, &["task", "done", "buy milk"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), "completed");
+
+    let out = vault_cmd(&root, &["task", "list", "completed"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("[x]"), "{text}");
+    assert!(text.contains("buy milk"), "{text}");
+}
+
+#[test]
+fn task_done_on_recurring_task_prints_next_due() {
+    let (_tmp, root) = new_vault();
+    vault_cmd(
+        &root,
+        &["task", "add", "pay rent every 1st at 9am p1 #home"],
+    );
+    let out = vault_cmd(&root, &["task", "done", "pay rent"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("next:"), "{}", stdout(&out));
+}
+
+#[test]
+fn task_reopen_and_archive_by_path() {
+    let (_tmp, root) = new_vault();
+    vault_cmd(&root, &["task", "add", "buy milk today"]);
+    vault_cmd(&root, &["task", "done", "Tasks/buy milk.md"]);
+    let out = vault_cmd(&root, &["--json", "task", "reopen", "Tasks/buy milk.md"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    // `done` is omitted from the JSON when false.
+    assert!(json_of(&out)["fields"]["done"].is_null());
+
+    let out = vault_cmd(&root, &["task", "archive", "buy milk"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = vault_cmd(&root, &["task", "list"]);
+    assert!(!stdout(&out).contains("buy milk"), "{}", stdout(&out));
+}
+
+#[test]
+fn task_list_paths_flag_appends_path() {
+    let (_tmp, root) = new_vault();
+    vault_cmd(&root, &["task", "add", "buy milk"]);
+    let out = vault_cmd(&root, &["task", "list", "--paths"]);
+    assert!(
+        stdout(&out).contains("(Tasks/buy milk.md)"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn agenda_json_has_seven_days() {
+    let (_tmp, root) = new_vault();
+    vault_cmd(&root, &["task", "add", "buy milk today"]);
+    let out = vault_cmd(&root, &["--json", "agenda"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let value = json_of(&out);
+    assert_eq!(value["days"].as_array().unwrap().len(), 7);
+    assert!(value["overdue"].is_array());
+}
+
+#[test]
+fn reminders_plan_runs_and_exits_zero() {
+    let (_tmp, root) = new_vault();
+    vault_cmd(
+        &root,
+        &["task", "add", "pay rent every 1st at 9am p1 #home"],
+    );
+    let out = vault_cmd(&root, &["reminders", "plan"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = vault_cmd(&root, &["--json", "reminders", "plan"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(json_of(&out).is_array());
+}
+
+#[test]
+fn view_save_then_views_round_trip() {
+    let (_tmp, root) = new_vault();
+    let out = vault_cmd(&root, &["task", "view-save", "Urgent", "p1 & open"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = vault_cmd(&root, &["--json", "task", "views"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let value = json_of(&out);
+    let view = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "Urgent")
+        .unwrap();
+    assert_eq!(view["filter"], "p1 & open");
+    assert_eq!(view["layout"], "list");
+}
+
+#[test]
+fn unknown_task_title_exits_with_code_1() {
+    let (_tmp, root) = new_vault();
+    let out = vault_cmd(&root, &["task", "done", "no such task"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("no task matches"), "{}", stderr(&out));
+}
