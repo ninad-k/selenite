@@ -12,9 +12,9 @@
 //! (the vault's file names), success, a coarse error category, revisions and a digest of the
 //! canonical arguments. Read-only tool calls are not logged.
 
+use crate::engine::Engine;
 use chrono::{DateTime, Datelike, Local};
 use selenite_core::VaultPath;
-use selenite_index::Engine;
 use selenite_storage::{StorageError, WriteMode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -44,7 +44,7 @@ pub struct AuditEntry {
     pub revision_after: Option<String>,
     /// blake3 hex digest of the canonical JSON of the call's arguments.
     pub args_digest: String,
-    /// Transport the call arrived on: `stdio` or `http`. Absent in entries written before the
+    /// Transport the call arrived on: `stdio`, `http` or `plugin:<id>`. Absent in entries written before the
     /// field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
@@ -74,7 +74,7 @@ fn canonical(value: &Value) -> Value {
 /// Digest (blake3 hex) of the canonical JSON form of `args`.
 pub fn args_digest(args: &Value) -> String {
     let text = serde_json::to_string(&canonical(args)).unwrap_or_default();
-    blake3::hash(text.as_bytes()).to_hex().to_string()
+    selenite_storage::content_hash(text.as_bytes())
 }
 
 fn file_for(ts: &DateTime<Local>) -> Result<VaultPath, selenite_core::PathError> {

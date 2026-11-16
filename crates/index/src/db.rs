@@ -7,8 +7,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use selenite_core::VaultPath;
 use selenite_vault::normalize_target;
 
+use crate::passages::Passage;
 use crate::query::SearchQuery;
-use crate::schema::SCHEMA;
+use crate::schema::{PASSAGE_ROWID_STRIDE, SCHEMA};
 use crate::{INDEX_VERSION, IndexError, Result};
 
 /// Marker inserted before a highlighted match in [`SearchHit::snippet`].
@@ -43,6 +44,21 @@ pub struct PageRecord {
     pub properties: Vec<(String, String)>,
     /// Task data, if the page is a row of a Tasks database.
     pub task: Option<TaskRecord>,
+    /// Citable passages of the body; line numbers are 1-based lines of the whole file.
+    pub passages: Vec<Passage>,
+}
+
+/// One full-text match in the passage table, before re-ranking.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PassageCandidate {
+    pub path: VaultPath,
+    pub title: String,
+    pub heading: Option<String>,
+    pub text: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    /// FTS5 bm25 (negative; lower is better).
+    pub bm25: f64,
 }
 
 /// Task columns stored for a task row. The full fields are kept as JSON so the index does not
@@ -261,7 +277,7 @@ impl Index {
     /// Remove every row (used by a full rebuild).
     pub fn clear(&mut self) -> Result<()> {
         self.conn
-            .execute_batch("DELETE FROM pages; DELETE FROM fts;")?;
+            .execute_batch("DELETE FROM pages; DELETE FROM fts; DELETE FROM passages;")?;
         Ok(())
     }
 
@@ -581,6 +597,36 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Passages matching the FTS5 expression `expr` (already quoted by the caller), best bm25
+    /// first, with the heading column weighted above the text. At most `limit` rows.
+    pub(crate) fn passage_candidates(
+        &self,
+        expr: &str,
+        limit: usize,
+    ) -> Result<Vec<PassageCandidate>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.path, p.title, passages.heading, passages.text, passages.start_line,
+                    passages.end_line, bm25(passages, 0.0, 5.0, 1.0, 0.0, 0.0) AS score
+             FROM passages JOIN pages p ON p.id = passages.page_id
+             WHERE passages MATCH ?1
+             ORDER BY score, p.path, passages.start_line
+             LIMIT CAST(?2 AS INTEGER)",
+        )?;
+        let rows = stmt.query_map(params![expr, limit.to_string()], |r| {
+            let heading: String = r.get(2)?;
+            Ok(PassageCandidate {
+                path: to_path(r.get(0)?)?,
+                title: r.get(1)?,
+                heading: Some(heading).filter(|h| !h.is_empty()),
+                text: r.get(3)?,
+                start_line: r.get(4)?,
+                end_line: r.get(5)?,
+                bm25: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Run a search (see [`SearchQuery`] for syntax). Results are best-first.
     pub fn search(&self, input: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let q = SearchQuery::parse(input);
@@ -644,6 +690,10 @@ fn remove_in(tx: &rusqlite::Transaction<'_>, path: &VaultPath) -> Result<bool> {
         .optional()?;
     let Some(id) = id else { return Ok(false) };
     tx.execute("DELETE FROM fts WHERE rowid = ?1", [id])?;
+    tx.execute(
+        "DELETE FROM passages WHERE rowid >= ?1 AND rowid < ?2",
+        params![id * PASSAGE_ROWID_STRIDE, (id + 1) * PASSAGE_ROWID_STRIDE],
+    )?;
     tx.execute("DELETE FROM pages WHERE id = ?1", [id])?;
     Ok(true)
 }
@@ -671,6 +721,23 @@ fn upsert_in(tx: &rusqlite::Transaction<'_>, rec: &PageRecord) -> Result<()> {
         "INSERT INTO fts (rowid, title, body) VALUES (?1, ?2, ?3)",
         params![id, rec.title, rec.body],
     )?;
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO passages (rowid, page_id, heading, text, start_line, end_line)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        let max = usize::try_from(PASSAGE_ROWID_STRIDE).unwrap_or(usize::MAX);
+        for (n, p) in rec.passages.iter().take(max).enumerate() {
+            stmt.execute(params![
+                id * PASSAGE_ROWID_STRIDE + i64::try_from(n).unwrap_or(0),
+                id,
+                p.heading.as_deref().unwrap_or(""),
+                p.text,
+                p.start_line,
+                p.end_line
+            ])?;
+        }
+    }
     {
         let mut stmt = tx.prepare_cached(
             "INSERT INTO aliases (page_id, alias, alias_norm) VALUES (?1, ?2, ?3)",

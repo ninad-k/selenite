@@ -9,6 +9,7 @@ members = [
     "crates/reminders",
     "crates/mcp",
     "crates/import",
+    "crates/plugins",
     "crates/cli",
     "apps/server",
     "apps/desktop/src-tauri",
@@ -22,6 +23,7 @@ default-members = [
     "crates/reminders",
     "crates/mcp",
     "crates/import",
+    "crates/plugins",
     "crates/cli",
     "apps/server",
 ]
@@ -42,6 +44,7 @@ selenite-sync = { path = "crates/sync" }
 selenite-reminders = { path = "crates/reminders" }
 selenite-mcp = { path = "crates/mcp" }
 selenite-import = { path = "crates/import" }
+selenite-plugins = { path = "crates/plugins" }
 
 thiserror = "2"
 anyhow = "1"

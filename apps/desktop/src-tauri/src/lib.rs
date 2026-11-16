@@ -4,13 +4,14 @@
 pub mod commands;
 pub mod state;
 
-use selenite_index::{BlockPage, DatabaseInfo, TreeNode, ViewResult};
+use selenite_index::{BlockPage, Citation, DatabaseInfo, TreeNode, ViewResult};
+use selenite_plugins::PluginInfo;
 use tauri::{Emitter, Manager, State};
 
 use commands::{
     AgendaDto, AppInfo, AutoSync, BacklinkDto, BlockTypeDto, CmdError, OutLinkDto, PageContent,
-    PageNode, ProjectDto, QuickAddResult, RemoteDto, SaveResult, SearchHitDto, SyncStatusDto,
-    TagDto, TaskDetail, TaskDto, VaultInfo, ViewDto,
+    PageNode, PluginSource, ProjectDto, QuickAddResult, RemoteDto, SaveResult, SearchHitDto,
+    SyncStatusDto, TagDto, TaskDetail, TaskDto, VaultInfo, ViewDto,
 };
 use state::{AppState, RemindersStatus, SyncSummary};
 
@@ -95,6 +96,40 @@ fn search(
     limit: usize,
 ) -> Result<Vec<SearchHitDto>, String> {
     s(commands::search(&state, &query, limit))
+}
+
+#[tauri::command]
+fn ask(
+    state: State<'_, AppState>,
+    question: String,
+    limit: usize,
+) -> Result<Vec<Citation>, String> {
+    s(commands::ask(&state, &question, limit))
+}
+
+#[tauri::command]
+fn plugin_list(state: State<'_, AppState>) -> Result<Vec<PluginInfo>, String> {
+    s(commands::plugin_list(&state))
+}
+
+#[tauri::command]
+fn plugin_set_enabled(state: State<'_, AppState>, id: String, enabled: bool) -> Result<(), String> {
+    s(commands::plugin_set_enabled(&state, &id, enabled))
+}
+
+#[tauri::command]
+fn plugin_load(state: State<'_, AppState>, id: String) -> Result<PluginSource, String> {
+    s(commands::plugin_load(&state, &id))
+}
+
+#[tauri::command]
+fn plugin_call(
+    state: State<'_, AppState>,
+    plugin_id: String,
+    method: String,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    s(commands::plugin_call(&state, &plugin_id, &method, &args))
 }
 
 #[tauri::command]
@@ -465,6 +500,11 @@ pub fn run() -> Result<(), tauri::Error> {
             create_page_at,
             resolve,
             search,
+            ask,
+            plugin_list,
+            plugin_set_enabled,
+            plugin_load,
+            plugin_call,
             backlinks,
             outgoing,
             tags,

@@ -28,6 +28,7 @@ Any client that takes a JSON server list:
 | Tool | Writes | Purpose |
 |------|--------|---------|
 | `search` | | Full-text search with `tag:`, `path:`, `title:`, `-term`, `"phrases"` |
+| `ask_vault` | | Natural-language question -> ranked citable passages (see below) |
 | `get_page` | | Page text, revision, backlinks, outgoing links |
 | `list_blocks` | | Top-level blocks of a page with index and `^anchor` |
 | `create_page` | yes | New page from a title or path |
@@ -55,7 +56,32 @@ There is **no delete tool**: agents can archive, never destroy. Every write acce
 instead of overwriting. Schema and row values are validated by the engine; a rejected write is a
 tool error (`isError`) and changes nothing.
 
-Resources: every page as `vault:///<path>`. Prompt: `daily_review`.
+Resources: every page as `vault:///<path>`. Prompts: `daily_review`, `answer_with_citations`.
+
+## Asking the vault (`ask_vault`)
+
+`ask_vault {question, limit?}` is retrieval only: Selenite never calls a model. The tool finds the
+passages that best match a plain-language question and the client (Claude) writes the answer.
+
+```json
+{ "question": "...",
+  "citations": [ { "path": "Travel/Berlin Trip.md", "title": "Berlin Trip", "heading": "Hotel",
+                   "start_line": 11, "end_line": 11, "excerpt": "...", "score": 0.93 } ],
+  "instructions": "Answer using only these passages and cite them as [path#Lstart-Lend]" }
+```
+
+- Pages are split into passages when indexed: by heading section, then paragraphs merged up to
+  about 800 characters; a code fence is never split. `start_line` / `end_line` are 1-based lines of
+  the whole file (front matter included), so `get_page` text lines up with the citation.
+- The question loses its stopwords; the rest are `OR`ed with prefix matching over an FTS5
+  `passages` table (bm25, headings weighted above body). Results are re-ranked by term coverage,
+  term proximity, title and heading matches, and a small boost for pages linked to or from the best
+  page. Overlapping passages are dropped, at most 3 per page, ties broken by path then line, so the
+  order is deterministic. `limit` defaults to 8 (max 25); `score` is higher-is-better.
+- It is a read tool: no audit entry. The `answer_with_citations` prompt tells the model to call
+  `ask_vault`, answer only from the passages and cite them as `[path#Lstart-Lend]`.
+- The desktop app shows the same ranked passages in its Ask panel (Ctrl+Shift+A); it makes no model
+  call.
 
 ## Audit log
 

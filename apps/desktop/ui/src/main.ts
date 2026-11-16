@@ -5,6 +5,8 @@ import { createEditor, type EditorHandle } from "./editor";
 import { enterWorkspace, initWorkspace, leaveWorkspace, reloadWorkspace } from "./workspace";
 import { enterTasks, initTasks, leaveTasks, refreshReminders, reloadTasks } from "./tasks";
 import { initStorage, onFocusSync, onVaultOpened } from "./storage";
+import { initAsk, openAsk } from "./ask";
+import { initPlugins, openPalette, openPluginManager, reloadPlugins, stopPlugins } from "./plugins";
 
 const HL_START = "";
 const HL_END = "";
@@ -191,6 +193,12 @@ async function loadPage(path: string, force = false): Promise<void> {
     app.loading = false;
     showBanner(`Could not open ${path}: ${errorText(err)}`);
   }
+}
+
+/** Open a page in Vault mode with lines `start`..`end` selected (an Ask citation). */
+async function openAt(path: string, start: number, end: number): Promise<void> {
+  await loadPage(path);
+  if (app.path === path) app.editor?.selectLines(start, end);
 }
 
 async function openTarget(target: string): Promise<void> {
@@ -514,6 +522,7 @@ async function enterVault(info: VaultInfo): Promise<void> {
     });
   }
   applyMode(info);
+  void reloadPlugins();
   await Promise.all([refreshTree(), refreshTags(), refreshLinks()]);
   const first = treeData?.children.find((c) => !c.is_dir && c.name.endsWith(".md"));
   if (first && !app.path && info.mode_id === "vault") await loadPage(first.path);
@@ -597,6 +606,7 @@ async function switchMode(id: string): Promise<void> {
 }
 
 async function showWelcome(): Promise<void> {
+  stopPlugins();
   $("app").hidden = true;
   $("welcome").hidden = false;
   const last = await api.lastVault().catch(() => null);
@@ -659,7 +669,13 @@ function wireShortcuts(): void {
     const mod = e.ctrlKey || e.metaKey;
     if (!mod) return;
     const key = e.key.toLowerCase();
-    if (key === "f" && e.shiftKey) {
+    if (key === "a" && e.shiftKey) {
+      e.preventDefault();
+      openAsk();
+    } else if (key === "p" && !e.shiftKey) {
+      e.preventDefault();
+      openPalette();
+    } else if (key === "f" && e.shiftKey) {
       e.preventDefault();
       openDialog("search");
     } else if (key === "o" && !e.shiftKey) {
@@ -670,6 +686,21 @@ function wireShortcuts(): void {
       openDialog("new");
     }
   });
+}
+
+function builtinCommands(): { id: string; title: string; run: () => void }[] {
+  const cmds = [
+    { id: "search", title: "Search the vault", run: () => openDialog("search") },
+    { id: "goto", title: "Go to page", run: () => openDialog("switch") },
+    { id: "new-page", title: "New page", run: () => openDialog("new") },
+    { id: "today", title: "Open today's daily note", run: () => $("btn-today").click() },
+    { id: "ask", title: "Ask the vault", run: () => openAsk() },
+    { id: "plugins", title: "Manage plugins", run: () => openPluginManager() },
+  ];
+  for (const m of app.vault?.modes ?? []) {
+    cmds.push({ id: `mode-${m.id}`, title: `Switch to ${m.label}`, run: () => void switchMode(m.id) });
+  }
+  return cmds;
 }
 
 function wireTabs(): void {
@@ -711,6 +742,7 @@ async function init(): Promise<void> {
   });
   $("btn-new").addEventListener("click", () => openDialog("new"));
   $("btn-search").addEventListener("click", () => openDialog("search"));
+  $("btn-ask").addEventListener("click", () => openAsk());
   $("btn-today").addEventListener("click", () => {
     void (async () => {
       try {
@@ -734,6 +766,8 @@ async function init(): Promise<void> {
     banner: showBanner,
     afterSync: () => void onSyncChanged(),
   });
+  initAsk({ openAt: (path, start, end) => void openAt(path, start, end) });
+  initPlugins({ builtins: builtinCommands, activePath: () => app.path });
   wireDialog();
   wireTabs();
   wireShortcuts();

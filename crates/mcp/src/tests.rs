@@ -856,6 +856,7 @@ async fn there_is_no_delete_tool() {
     }
     for expected in [
         "search",
+        "ask_vault",
         "get_page",
         "create_page",
         "append_blocks",
@@ -886,7 +887,7 @@ async fn there_is_no_delete_tool() {
             "missing tool {expected}"
         );
     }
-    assert_eq!(names.len(), 25);
+    assert_eq!(names.len(), 26);
 }
 
 #[tokio::test]
@@ -916,4 +917,54 @@ fn resource_uris_round_trip() {
     assert_eq!(path_from_uri(&uri), Some(p));
     assert_eq!(path_from_uri("file:///x.md"), None);
     assert_eq!(path_from_uri("vault:///../x.md"), None);
+}
+
+#[tokio::test]
+async fn ask_vault_returns_cited_passages_and_instructions() {
+    let (_d, s) = server();
+    create(
+        &s,
+        "Travel/Berlin.md",
+        "---\ntitle: Berlin\n---\n# Berlin\n\n## Hotel\n\nWe stay at Hotel Adlon; checkout is at noon.\n",
+    )
+    .await;
+    create(&s, "Other.md", "# Other\n\nNothing relevant here.\n").await;
+    let r = ok(s
+        .ask_vault(Parameters(AskParams {
+            question: "When is checkout at the hotel?".into(),
+            limit: Some(3),
+        }))
+        .await);
+    assert_eq!(r["question"], "When is checkout at the hotel?");
+    assert_eq!(
+        r["instructions"],
+        "Answer using only these passages and cite them as [path#Lstart-Lend]"
+    );
+    let first = &r["citations"][0];
+    assert_eq!(first["path"], "Travel/Berlin.md");
+    assert_eq!(first["heading"], "Hotel");
+    assert_eq!(first["start_line"], 8);
+    assert_eq!(first["end_line"], 8);
+    assert!(
+        first["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("checkout is at noon")
+    );
+    // A read tool writes no audit entry.
+    assert!(
+        s.audit_entries(10)
+            .await
+            .unwrap()
+            .iter()
+            .all(|e| e.tool != "ask_vault")
+    );
+
+    let none = ok(s
+        .ask_vault(Parameters(AskParams {
+            question: "what is the".into(),
+            limit: None,
+        }))
+        .await);
+    assert_eq!(none["citations"].as_array().unwrap().len(), 0);
 }

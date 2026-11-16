@@ -25,6 +25,8 @@ export interface EditorHandle {
   setText: (text: string) => void;
   getText: () => string;
   focus: () => void;
+  /** Select and scroll to 1-based lines `from`..`to` (inclusive); out-of-range lines are clamped. */
+  selectLines: (from: number, to: number) => void;
 }
 
 const WIKILINK = /!?\[\[([^\]\n]+)\]\]/g;
@@ -197,6 +199,17 @@ export function createEditor(parent: HTMLElement, cb: EditorCallbacks): EditorHa
     setText: (text) => view.setState(makeState(text)),
     getText: () => view.state.doc.toString(),
     focus: () => view.focus(),
+    selectLines: (from, to) => {
+      const doc = view.state.doc;
+      const clamp = (n: number): number => Math.min(Math.max(1, Math.floor(n)), doc.lines);
+      const a = doc.line(clamp(from));
+      const b = doc.line(clamp(Math.max(from, to)));
+      view.dispatch({
+        selection: { anchor: a.from, head: b.to },
+        effects: EditorView.scrollIntoView(a.from, { y: "start", yMargin: 48 }),
+      });
+      view.focus();
+    },
   };
 }
 
