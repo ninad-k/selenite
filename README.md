@@ -45,3 +45,5 @@ cargo tauri dev
 Licence: not yet chosen (see docs/open-questions.md).
 
 Inspired by the capability sets of popular note, wiki and task apps; built clean-room (see docs/decisions.md ADR-008).
+
+On Linux, the OS keychain support needs D-Bus headers: `sudo apt-get install libdbus-1-dev pkg-config`.
