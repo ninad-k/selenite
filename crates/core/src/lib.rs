@@ -2,12 +2,14 @@
 //!
 //! This crate holds the product name ([`APP_NAME`]); no other crate may hard-code it.
 
+pub mod filter;
 pub mod mode;
 pub mod path;
 pub mod quickadd;
 pub mod recurrence;
 pub mod task;
 
+pub use filter::{BuiltinView, Filter, FilterError, Term, builtin};
 pub use mode::{Mode, ModeNames};
 pub use path::{PathError, VaultPath};
 pub use quickadd::{QuickAdd, parse_quick_add};
