@@ -857,15 +857,14 @@ fn date_add(base: &Value, n: f64, unit: &str) -> Option<Value> {
         } else {
             dt.checked_add_days(days)?
         }
-    } else if let Some(per) = unit_months(unit) {
+    } else {
+        let per = unit_months(unit)?;
         let months = Months::new(u32::try_from(mag).ok()?.checked_mul(per)?);
         if back {
             dt.checked_sub_months(months)?
         } else {
             dt.checked_add_months(months)?
         }
-    } else {
-        return None;
     };
     Some(match base {
         Value::DateTime(_) => Value::DateTime(moved),
