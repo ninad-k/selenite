@@ -11,3 +11,5 @@ The clean-room rule: we match reference apps by behaviour and capability only, a
 | 2026-11-16 | SQLite FTS5 docs, https://www.sqlite.org/fts5.html | Full-text index syntax and behaviour | Public domain | Index and full-text search |
 | 2026-11-16 | Tauri 2 docs, https://v2.tauri.app | App shell, bundling and OS integration APIs | Public documentation; check project licence | Desktop shell |
 | 2026-11-16 | Model Context Protocol spec, https://modelcontextprotocol.io | MCP transports and tool model | Open specification; check repository licence | MCP server (ADR-007) |
+| 2026-11-16 | rmcp crate source (https://github.com/modelcontextprotocol/rust-sdk) | Server, tool macro and transport APIs (v3.10) | See crate licence | MCP server implementation |
+| 2026-11-16 | MCP Inspector (https://github.com/modelcontextprotocol/inspector) | CLI mode for verifying tools/list, tools/call, resources/list | See project licence | Phase 3 verification only (not shipped) |
