@@ -1104,6 +1104,56 @@ pub const ASSET_BASE: &str = if cfg!(windows) {
     "vault://localhost/"
 };
 
+/// Base URL of the `plugin` URI scheme that serves sandboxed plugin frames.
+pub const PLUGIN_BASE: &str = if cfg!(windows) {
+    "http://plugin.localhost/"
+} else {
+    "plugin://localhost/"
+};
+
+/// The script that defines the `selenite` global inside a plugin frame.
+const PLUGIN_BOOTSTRAP: &str = include_str!("plugin_bootstrap.js");
+
+/// Keep text from ending its `<script>` element or opening an HTML comment.
+fn script_safe(js: &str) -> String {
+    let mut out = String::with_capacity(js.len());
+    let lower = js.to_ascii_lowercase();
+    let b = js.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if lower[i..].starts_with("</script") {
+            out.push_str(r"<\/");
+            i += 2;
+        } else if js[i..].starts_with("<!--") {
+            out.push_str(r"<\!--");
+            i += 4;
+        } else {
+            let ch = js[i..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// Build the HTML document of an enabled, unchanged plugin for the `plugin` scheme.
+/// `request_path` is `/<plugin-id>/`; anything else (or a plugin that is disabled, changed or
+/// invalid) yields `None`, which the scheme handler turns into a 404.
+pub fn plugin_frame(state: &AppState, request_path: &str) -> Option<String> {
+    let id = request_path
+        .strip_prefix('/')
+        .and_then(|p| p.strip_suffix('/'))
+        .filter(|id| selenite_plugins::is_valid_id(id))?;
+    let loaded = state
+        .with_engine(|e| Ok(selenite_plugins::load_enabled(e, id)?))
+        .ok()?;
+    Some(format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"></head><body><script>{}</script><script>{}</script></body></html>",
+        script_safe(PLUGIN_BOOTSTRAP),
+        script_safe(&loaded.source)
+    ))
+}
+
 /// One node of the Workspace page tree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PageNode {
@@ -2668,6 +2718,52 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn plugin_frames_are_only_served_for_enabled_unchanged_plugins() {
+        let (_d, state) = fixture();
+        put_plugin(&state, "reader", r#""read""#);
+        // Disabled, malformed and unknown requests are all refused.
+        assert!(plugin_frame(&state, "/reader/").is_none());
+        plugin_set_enabled(&state, "reader", true).unwrap();
+        for bad in [
+            "",
+            "/",
+            "/reader",
+            "reader/",
+            "/../reader/",
+            "/reader/x",
+            "//",
+            "/nope/",
+        ] {
+            assert!(plugin_frame(&state, bad).is_none(), "{bad}");
+        }
+        let html = plugin_frame(&state, "/reader/").unwrap();
+        assert!(html.contains("// plugin") && html.contains("selenite"));
+        assert!(!html.contains("srcdoc"));
+        // A changed file no longer matches its enabled hash.
+        state
+            .with_engine(|e| {
+                e.storage()
+                    .write(
+                        &selenite_core::VaultPath::new(".selenite/plugins/reader/main.js").unwrap(),
+                        b"// changed",
+                        selenite_storage::WriteMode::Overwrite,
+                    )
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert!(plugin_frame(&state, "/reader/").is_none());
+    }
+
+    #[test]
+    fn script_safe_neutralises_script_end_and_comment_openers() {
+        let out = script_safe("a</SCRIPT>b<!--c é");
+        assert!(!out.to_ascii_lowercase().contains("</script"));
+        assert!(!out.contains("<!--"));
+        assert!(out.ends_with("é"));
     }
 
     #[test]

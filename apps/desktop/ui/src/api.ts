@@ -288,6 +288,7 @@ export const api = {
   pluginList: () => invoke<PluginInfo[]>("plugin_list"),
   pluginSetEnabled: (id: string, enabled: boolean) =>
     invoke<void>("plugin_set_enabled", { id, enabled }),
+  pluginBase: () => invoke<string>("plugin_base"),
   pluginLoad: (id: string) => invoke<PluginSource>("plugin_load", { id }),
   pluginCall: (pluginId: string, method: string, args: Record<string, unknown>) =>
     invoke<unknown>("plugin_call", { pluginId, method, args }),

@@ -242,6 +242,11 @@ fn block_types() -> Vec<BlockTypeDto> {
 }
 
 #[tauri::command]
+fn plugin_base() -> &'static str {
+    commands::PLUGIN_BASE
+}
+
+#[tauri::command]
 fn asset_base() -> &'static str {
     commands::ASSET_BASE
 }
@@ -463,6 +468,33 @@ fn asset_response(app: &tauri::AppHandle, request_path: &str) -> tauri::http::Re
     result.unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
 }
 
+/// Response headers for plugin frames: nothing may load or connect, and no other origin may embed
+/// the document as a subresource.
+const PLUGIN_FRAME_CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; form-action 'none'; base-uri 'none'; navigate-to 'none'";
+
+fn plugin_frame_response(
+    app: &tauri::AppHandle,
+    request_path: &str,
+) -> tauri::http::Response<Vec<u8>> {
+    let state = app.state::<AppState>();
+    let result = match commands::plugin_frame(&state, request_path) {
+        Some(html) => tauri::http::Response::builder()
+            .status(200)
+            .header("Content-Type", "text/html; charset=utf-8")
+            .header("Content-Security-Policy", PLUGIN_FRAME_CSP)
+            .header("Cross-Origin-Resource-Policy", "same-origin")
+            .header("X-Content-Type-Options", "nosniff")
+            .header("Cache-Control", "no-store")
+            .body(html.into_bytes()),
+        None => tauri::http::Response::builder()
+            .status(404)
+            .header("Content-Security-Policy", PLUGIN_FRAME_CSP)
+            .header("Cache-Control", "no-store")
+            .body(Vec::new()),
+    };
+    result.unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
+}
+
 /// Start the desktop application and block until the window closes.
 ///
 /// # Errors
@@ -476,6 +508,9 @@ pub fn run() -> Result<(), tauri::Error> {
     tauri::Builder::default()
         .register_uri_scheme_protocol("vault", |ctx, request| {
             asset_response(ctx.app_handle(), request.uri().path())
+        })
+        .register_uri_scheme_protocol("plugin", |ctx, request| {
+            plugin_frame_response(ctx.app_handle(), request.uri().path())
         })
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
@@ -504,6 +539,7 @@ pub fn run() -> Result<(), tauri::Error> {
             plugin_list,
             plugin_set_enabled,
             plugin_load,
+            plugin_base,
             plugin_call,
             backlinks,
             outgoing,

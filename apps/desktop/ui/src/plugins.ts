@@ -1,10 +1,10 @@
 // Plugin host UI: runs enabled plugins in sandboxed iframes, relays their postMessage requests to
 // the `plugin_call` command, and provides the command palette (Ctrl+P) and the plugin manager.
 //
-// Security model (see docs/plugins.md): the iframe is `sandbox="allow-scripts"` without
-// `allow-same-origin`, so it has an opaque origin and no access to this page, its storage or the
-// Tauri IPC bridge. Its document carries a CSP of `default-src 'none'`, so it cannot load
-// anything or open connections. It can only postMessage requests to this window, and this file
+// Security model (see docs/plugins.md): each plugin runs in an `<iframe sandbox="allow-scripts">`
+// (no `allow-same-origin`) whose document is served by Rust from the `plugin` URI scheme with its
+// own strict CSP (no network, no navigation). The frame has an opaque origin and no access to this
+// page or the Tauri IPC bridge. It can only postMessage requests to this window, and this file
 // forwards them to Rust, which checks the manifest permissions. This file never decides what a
 // plugin may do and never trusts a plugin-supplied identity: the plugin id is taken from the
 // iframe the message came from. All text goes in via textContent.
@@ -34,82 +34,16 @@ interface Running {
 }
 
 const PROTOCOL_VERSION = 1;
+let frameBasePromise: Promise<string> | null = null;
+/** Base URL of the `plugin` scheme (platform specific), fetched once from Rust. */
+function frameBase(): Promise<string> {
+  frameBasePromise ??= api.pluginBase();
+  return frameBasePromise;
+}
 const running = new Map<string, Running>();
 let hooks: PluginHooks | null = null;
 let listening = false;
 let generation = 0;
-
-/** Runs inside the iframe before the plugin; defines the `selenite` global over postMessage. */
-const BOOTSTRAP = [
-  '"use strict";',
-  "(function () {",
-  "  var pending = new Map();",
-  "  var handlers = Object.create(null);",
-  "  var seq = 0;",
-  "  function rpc(method, args) {",
-  "    return new Promise(function (resolve, reject) {",
-  "      var id = ++seq;",
-  "      pending.set(id, { resolve: resolve, reject: reject });",
-  `      parent.postMessage({ v: ${PROTOCOL_VERSION}, id: id, method: method, args: args || {} }, "*");`,
-  "    });",
-  "  }",
-  '  window.addEventListener("message", function (ev) {',
-  "    if (ev.source !== parent) return;",
-  `    var m = ev.data;`,
-  `    if (!m || m.v !== ${PROTOCOL_VERSION}) return;`,
-  '    if (m.type === "command") {',
-  "      var fn = handlers[m.id];",
-  "      if (typeof fn === 'function') {",
-  "        Promise.resolve().then(function () { return fn(m.context || {}); }).catch(function (e) {",
-  "          var msg = String((e && e.message) || e).slice(0, 200);",
-  "          rpc('ui.notify', { text: 'Command failed: ' + msg }).catch(function () {});",
-  "        });",
-  "      }",
-  "      return;",
-  "    }",
-  "    var p = pending.get(m.id);",
-  "    if (!p) return;",
-  "    pending.delete(m.id);",
-  "    if (m.ok) p.resolve(m.result); else p.reject(new Error(String(m.error)));",
-  "  });",
-  "  function args(o) { var out = {}; for (var k in o) { if (o[k] !== undefined) out[k] = o[k]; } return out; }",
-  "  var api = {",
-  `    version: ${PROTOCOL_VERSION},`,
-  "    vault: {",
-  "      search: function (q, limit) { return rpc('vault.search', args({ q: q, limit: limit })).then(function (r) { return r.results; }); },",
-  "      read: function (path) { return rpc('vault.read', { path: path }); },",
-  "      backlinks: function (path) { return rpc('vault.backlinks', { path: path }).then(function (r) { return r.backlinks; }); },",
-  "      createPage: function (title, markdown) { return rpc('vault.createPage', { title: title, markdown: markdown }); },",
-  "      appendBlocks: function (path, markdown) { return rpc('vault.appendBlocks', { path: path, markdown: markdown }); }",
-  "    },",
-  "    ui: {",
-  "      registerCommand: function (id, title, handler) {",
-  "        if (typeof handler !== 'function') return Promise.reject(new Error('registerCommand needs a handler function'));",
-  "        handlers[id] = handler;",
-  "        return rpc('ui.registerCommand', { id: id, title: title });",
-  "      },",
-  "      notify: function (text) { return rpc('ui.notify', { text: String(text) }); }",
-  "    }",
-  "  };",
-  "  Object.freeze(api.vault); Object.freeze(api.ui); Object.freeze(api);",
-  "  Object.defineProperty(window, 'selenite', { value: api, writable: false, configurable: false });",
-  "})();",
-].join("\n");
-
-const FRAME_CSP = "default-src 'none'; script-src 'unsafe-inline'; form-action 'none'; base-uri 'none'";
-
-/** Keep text from ending its <script> element or opening an HTML comment. */
-function scriptSafe(js: string): string {
-  return js.replace(/<\/(script)/gi, "<\\/$1").replace(/<!--/g, "<\\!--");
-}
-
-function buildSrcdoc(source: string): string {
-  return (
-    '<!doctype html><html><head><meta charset="utf-8">' +
-    `<meta http-equiv="Content-Security-Policy" content="${FRAME_CSP}"></head><body>` +
-    `<script>${scriptSafe(BOOTSTRAP)}</script><script>${scriptSafe(source)}</script></body></html>`
-  );
-}
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -173,7 +107,7 @@ async function startPlugin(info: PluginInfo, gen: number): Promise<void> {
   frame.setAttribute("aria-hidden", "true");
   frame.tabIndex = -1;
   frame.className = "plugin-frame";
-  frame.srcdoc = buildSrcdoc(src.source);
+  frame.src = `${await frameBase()}${encodeURIComponent(src.id)}/`;
   running.set(src.id, { id: src.id, name: src.name, frame, commands: new Map() });
   document.body.append(frame);
 }
