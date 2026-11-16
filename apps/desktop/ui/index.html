@@ -6,16 +6,80 @@
     <title></title>
   </head>
   <body>
-    <div class="shell">
-      <aside class="sidebar" aria-label="Sidebar"></aside>
-      <main class="main">
-        <header class="topbar">
-          <span class="mode" id="mode">Vault</span>
-        </header>
-        <section class="content">
-          <h1 id="app-title" aria-live="polite"></h1>
+    <section id="welcome" class="welcome" hidden aria-labelledby="welcome-title">
+      <div class="welcome-card">
+        <h1 id="welcome-title"></h1>
+        <p class="muted">Point to a folder of Markdown notes, or start a fresh vault.</p>
+        <label for="folder-path" class="field-label">Folder path</label>
+        <input id="folder-path" type="text" spellcheck="false" autocomplete="off"
+               placeholder="C:\Users\you\Notes" />
+        <div class="row">
+          <button id="btn-open-folder" type="button" class="primary">Open folder</button>
+          <button id="btn-create-vault" type="button">Create vault here</button>
+        </div>
+        <p id="welcome-error" class="error" role="alert" hidden></p>
+        <div id="recent" hidden>
+          <h2>Last vault</h2>
+          <button id="btn-recent" type="button" class="recent"></button>
+        </div>
+      </div>
+    </section>
+
+    <div id="app" class="shell" hidden>
+      <aside class="sidebar" aria-label="Sidebar">
+        <div class="vault-head">
+          <span id="vault-name" class="vault-name"></span>
+          <span id="mode" class="mode"></span>
+        </div>
+        <div class="side-actions">
+          <button id="btn-new" type="button" aria-label="New page">New page</button>
+          <button id="btn-today" type="button" aria-label="Open today's daily note">Today</button>
+          <button id="btn-search" type="button" aria-label="Search the vault">Search</button>
+        </div>
+        <nav id="tree" class="tree" aria-label="Files"></nav>
+        <section class="tags" aria-labelledby="tags-title">
+          <h2 id="tags-title">Tags</h2>
+          <div id="tags" class="tag-list"></div>
         </section>
+      </aside>
+
+      <main class="main">
+        <div id="banner" class="banner" role="alert" hidden>
+          <span id="banner-text"></span>
+          <button id="banner-action" type="button" hidden></button>
+          <button id="banner-close" type="button" aria-label="Dismiss message">Dismiss</button>
+        </div>
+        <div class="editor-wrap">
+          <div id="editor" class="editor" aria-label="Page editor"></div>
+          <p id="empty" class="empty">Open a page from the list, or press Ctrl+O to jump to one.</p>
+        </div>
+        <footer class="statusbar">
+          <span id="status-path" class="status-path"></span>
+          <span id="status-state" class="status-state" role="status" aria-live="polite"></span>
+        </footer>
       </main>
+
+      <aside class="panel" aria-label="Links">
+        <div class="tabs" role="tablist" aria-label="Link panels">
+          <button id="tab-back" type="button" role="tab" aria-selected="true"
+                  aria-controls="list-back">Backlinks</button>
+          <button id="tab-out" type="button" role="tab" aria-selected="false"
+                  aria-controls="list-out" tabindex="-1">Outgoing</button>
+        </div>
+        <div id="list-back" class="link-list" role="tabpanel" aria-labelledby="tab-back"></div>
+        <div id="list-out" class="link-list" role="tabpanel" aria-labelledby="tab-out" hidden></div>
+      </aside>
+    </div>
+
+    <div id="overlay" class="overlay" hidden>
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+        <h2 id="dialog-title" class="dialog-title"></h2>
+        <input id="dialog-input" type="text" spellcheck="false" autocomplete="off"
+               role="combobox" aria-expanded="true" aria-controls="dialog-results"
+               aria-autocomplete="list" />
+        <ul id="dialog-results" class="results" role="listbox" aria-label="Results"></ul>
+        <p id="dialog-hint" class="muted hint"></p>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
