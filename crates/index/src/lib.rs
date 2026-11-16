@@ -5,6 +5,7 @@
 //! (`Engine::rebuild_index`).
 
 pub mod ask;
+pub mod audit;
 pub mod blocks;
 pub mod databases;
 mod db;

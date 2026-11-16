@@ -10,7 +10,7 @@
 //! Audit entries record which one a call used. On stdio, stdout is the protocol channel, so nothing here may print to it; logs go
 //! to stderr.
 
-pub mod audit;
+pub use selenite_index::audit;
 mod server;
 
 use std::sync::Arc;
