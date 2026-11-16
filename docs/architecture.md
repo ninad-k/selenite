@@ -91,3 +91,17 @@ files to `.selenite/trash/`.
 - Tauri capabilities are minimal; the UI cannot touch the filesystem directly.
 - Logs carry paths and counts only, never note content or tokens.
 - OAuth tokens (Phase 5) go to the OS keychain only.
+
+## Cloud storage and sync (Phase 5)
+
+- Providers: `LocalFolder`, `GoogleDrive` (scope `drive.file`, app-created folder), `OneDrive`
+  (scope `Files.ReadWrite.AppFolder`, `Apps/<name>`). OAuth is PKCE with a loopback redirect;
+  only the refresh token is stored, in the OS keychain (`<APP_NAME>-<provider>` / remote id).
+- `.selenite/remotes.yaml` lists connected remotes (no secrets). Client IDs come from environment
+  variables in development and from build-time configuration in releases (see `docs/oauth-setup.md`).
+- `selenite_sync::sync` does a three-way compare per file against `.selenite/sync/<remote>.json`.
+  A file changed on both sides is never overwritten: both versions are kept as conflict copies
+  on both sides. Deletes move files to the trash. Offline runs record pending paths in
+  `.selenite/sync/queue.json`. The index and sync state are never synced.
+- Known limit: Google Drive has no conditional writes, so a Replace is check-then-write with a
+  window of about one round trip; OneDrive uses `If-Match`.

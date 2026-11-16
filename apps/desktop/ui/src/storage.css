@@ -1,0 +1,19 @@
+/* ---- cloud storage: gear, status bar, settings dialog ---- */
+.gear { flex: none; border: 0; background: transparent; padding: 2px 6px; font-size: 16px; line-height: 1; color: var(--muted); }
+.gear:hover { color: var(--text); background: var(--hover); }
+.status-sync { border: 0; background: transparent; padding: 0 6px; margin-left: auto; margin-right: 8px; font-size: inherit; color: inherit; }
+.status-sync:hover { text-decoration: underline; }
+.status-sync[data-state="conflict"] { color: var(--danger); font-weight: 600; }
+.status-sync[data-state="offline"], .status-sync[data-state="error"] { color: var(--warn); }
+.status-sync:not([hidden]) + .status-reminders { margin-left: 0; }
+.settings { width: min(560px, 94vw); max-height: 85vh; overflow: auto; }
+.settings h3 { margin: 14px 0 4px; font-size: 14px; }
+.settings p { margin: 4px 0; }
+.remote-list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.remote-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+.remote-main { display: flex; flex-direction: column; min-width: 0; }
+.remote-title { font-weight: 600; overflow-wrap: anywhere; }
+.remote-actions { display: flex; gap: 6px; flex: none; }
+.connect-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.conflict-list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.conflict-list button { width: 100%; text-align: left; overflow-wrap: anywhere; }

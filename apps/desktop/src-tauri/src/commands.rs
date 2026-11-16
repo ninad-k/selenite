@@ -16,7 +16,17 @@ use selenite_storage::{Revision, StorageError};
 use selenite_vault::{DatabaseSchema, Document, PropertyValue, SavedView};
 use serde::{Deserialize, Serialize};
 
-use crate::state::{AppState, RemindersStatus};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use selenite_storage::LocalFolder;
+use selenite_storage::oauth::{OAuthConfig, TokenStore, default_open_browser};
+use selenite_sync::remote::SIGN_IN_TIMEOUT;
+use selenite_sync::{
+    Provider, RemoteConfig, RemoteError, RemotesFile, ReportSummary, client_config, keychain_store,
+    now_secs, pending, sign_in,
+};
+
+use crate::state::{AppState, RemindersStatus, SyncSummary};
 
 /// Errors surfaced to the UI as plain strings.
 #[derive(Debug, thiserror::Error)]
@@ -39,6 +49,9 @@ pub enum CmdError {
     /// A task request was invalid.
     #[error("{0}")]
     Task(String),
+    /// A cloud remote or sync request failed.
+    #[error("{0}")]
+    Remote(String),
 }
 
 impl From<EngineError> for CmdError {
@@ -1511,6 +1524,358 @@ pub fn row_set(
     state.with_engine(|e| Ok(e.set_row_property(&p, property, value)?))
 }
 
+// ---------------------------------------------------------------- cloud sync
+
+fn remote_err(e: impl std::fmt::Display) -> CmdError {
+    CmdError::Remote(e.to_string())
+}
+
+/// A configured remote as the UI shows it. Contains no secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RemoteDto {
+    /// Remote id, e.g. `gdrive-1`.
+    pub id: String,
+    /// Provider slug (`google-drive`, `onedrive`).
+    pub provider: String,
+    /// Provider display name.
+    pub provider_label: String,
+    /// Remote folder name.
+    pub folder: String,
+    /// Optional account label.
+    pub account_hint: Option<String>,
+    /// Unix seconds of the last successful sync in this session.
+    pub last_sync: Option<i64>,
+}
+
+/// Sync state for the status bar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SyncStatusDto {
+    /// A run is in flight.
+    pub running: bool,
+    /// Number of configured remotes.
+    pub remotes: usize,
+    /// Unix seconds when the last run finished.
+    pub last_run: Option<i64>,
+    /// Counts and paths of the last run.
+    pub last_report: Option<SyncSummary>,
+    /// Paths still waiting for an unreachable remote.
+    pub pending: usize,
+    /// Last whole-run failure.
+    pub error: Option<String>,
+}
+
+/// What triggered an automatic sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoSync {
+    /// A vault was opened.
+    Open,
+    /// The five-minute timer fired.
+    Tick,
+    /// The window regained focus.
+    Focus,
+}
+
+impl AutoSync {
+    /// Parse the UI's reason string; unknown values count as a focus event (the most cautious).
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "open" => Self::Open,
+            "tick" => Self::Tick,
+            _ => Self::Focus,
+        }
+    }
+
+    /// Minimum age of the previous run before this trigger syncs again.
+    const fn min_age_secs(self) -> i64 {
+        match self {
+            Self::Open | Self::Tick => 0,
+            Self::Focus => 60,
+        }
+    }
+}
+
+/// Interval of the background sync timer.
+pub const AUTO_SYNC_INTERVAL_SECS: u64 = 300;
+
+fn vault_local(state: &AppState) -> Result<LocalFolder, CmdError> {
+    let root = state.with_engine(|e| Ok(e.root().map(Path::to_path_buf)))?;
+    let root = root.ok_or(CmdError::NoVault)?;
+    LocalFolder::open(root).map_err(remote_err)
+}
+
+fn load_remotes(local: &LocalFolder) -> Result<RemotesFile, CmdError> {
+    RemotesFile::load(local).map_err(remote_err)
+}
+
+fn remote_dto(state: &AppState, r: &RemoteConfig) -> RemoteDto {
+    RemoteDto {
+        id: r.id.clone(),
+        provider: r.provider.slug().to_owned(),
+        provider_label: r.provider.label().to_owned(),
+        folder: r.folder.clone(),
+        account_hint: r.account_hint.clone(),
+        last_sync: state.lock_sync().per_remote.get(&r.id).copied(),
+    }
+}
+
+/// The vault's configured remotes.
+///
+/// # Errors
+///
+/// Fails when no vault is open or `remotes.yaml` is unreadable.
+pub fn remotes_list(state: &AppState) -> Result<Vec<RemoteDto>, CmdError> {
+    let file = load_remotes(&vault_local(state)?)?;
+    Ok(file.remotes.iter().map(|r| remote_dto(state, r)).collect())
+}
+
+/// Sign in to a provider in the browser and record the remote. Blocks until the sign-in ends
+/// (up to five minutes); call it from a background thread.
+///
+/// # Errors
+///
+/// Fails when the build has no client id, the sign-in is abandoned, or the file cannot be saved.
+pub fn remote_connect(
+    state: &AppState,
+    provider: &str,
+    folder: Option<&str>,
+) -> Result<RemoteDto, CmdError> {
+    let provider = Provider::parse(provider)
+        .ok_or_else(|| remote_err(format!("unknown provider {provider}")))?;
+    remote_connect_with(
+        state,
+        provider,
+        folder,
+        client_config(provider),
+        &|p, id| keychain_store(p, id),
+        &default_open_browser,
+    )
+}
+
+/// [`remote_connect`] with explicit sign-in plumbing (tests).
+///
+/// # Errors
+///
+/// Same as [`remote_connect`].
+pub fn remote_connect_with(
+    state: &AppState,
+    provider: Provider,
+    folder: Option<&str>,
+    client: Result<OAuthConfig, RemoteError>,
+    store_for: &dyn Fn(Provider, &str) -> std::sync::Arc<dyn TokenStore>,
+    open_browser: &dyn Fn(&str) -> Result<(), String>,
+) -> Result<RemoteDto, CmdError> {
+    let local = vault_local(state)?;
+    let mut file = load_remotes(&local)?;
+    let id = file.next_id(provider);
+    let folder = folder
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            local
+                .root()
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "vault".to_owned());
+    let store = store_for(provider, &id);
+    sign_in(
+        provider,
+        client,
+        std::sync::Arc::clone(&store),
+        open_browser,
+        SIGN_IN_TIMEOUT,
+    )
+    .map_err(remote_err)?;
+    let remote = RemoteConfig {
+        id,
+        provider,
+        folder,
+        account_hint: None,
+    };
+    file.remotes.push(remote.clone());
+    if let Err(e) = file.save(&local) {
+        let _ = store.clear();
+        return Err(remote_err(e));
+    }
+    Ok(remote_dto(state, &remote))
+}
+
+/// Forget a remote and its stored sign-in. Files already in the cloud are never touched.
+///
+/// # Errors
+///
+/// Fails on an unknown id or when the file or keychain cannot be updated.
+pub fn remote_disconnect(state: &AppState, id: &str) -> Result<(), CmdError> {
+    let local = vault_local(state)?;
+    let mut file = load_remotes(&local)?;
+    let removed = file
+        .remove(id)
+        .ok_or_else(|| remote_err(format!("no remote named {id}")))?;
+    file.save(&local).map_err(remote_err)?;
+    state.lock_sync().per_remote.remove(id);
+    state.remotes.forget(&removed).map_err(remote_err)
+}
+
+struct RunGuard<'a>(&'a AtomicBool);
+
+impl<'a> RunGuard<'a> {
+    fn acquire(flag: &'a AtomicBool) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self(flag))
+    }
+}
+
+impl Drop for RunGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// Sync one remote (`Some(id)`) or all of them (`None`) and refresh the index. Blocks on network
+/// I/O without holding the engine lock; call it from a background thread.
+///
+/// # Errors
+///
+/// Fails when no vault is open, the id is unknown, or another sync is already running.
+/// Per-remote failures are reported in the summary, not as errors.
+pub fn sync_now(state: &AppState, id: Option<&str>) -> Result<SyncSummary, CmdError> {
+    sync_now_at(state, id, now_secs())
+}
+
+/// [`sync_now`] at an explicit time.
+///
+/// # Errors
+///
+/// Same as [`sync_now`].
+pub fn sync_now_at(state: &AppState, id: Option<&str>, now: i64) -> Result<SyncSummary, CmdError> {
+    let local = vault_local(state)?;
+    let file = load_remotes(&local)?;
+    let remotes: Vec<RemoteConfig> = match id {
+        Some(id) => vec![
+            file.get(id)
+                .cloned()
+                .ok_or_else(|| remote_err(format!("no remote named {id}")))?,
+        ],
+        None => file.remotes.clone(),
+    };
+    let _guard = RunGuard::acquire(&state.sync_running)
+        .ok_or_else(|| remote_err("a sync is already running"))?;
+    let mut summary = SyncSummary::default();
+    let mut synced = Vec::new();
+    for r in &remotes {
+        summary.remotes += 1;
+        let run = state.remotes.open(r).and_then(|remote| {
+            selenite_sync::sync(&local, remote.as_ref(), &r.id, now).map_err(|e| e.to_string())
+        });
+        match run {
+            Ok(report) => {
+                let s = ReportSummary::from(&report);
+                summary.pushed += s.pushed.len();
+                summary.pulled += s.pulled.len();
+                summary.trashed += s.trashed.len();
+                summary.conflicts.extend(s.conflicts);
+                for p in s.unresolved {
+                    if !summary.unresolved.contains(&p) {
+                        summary.unresolved.push(p);
+                    }
+                }
+                summary
+                    .errors
+                    .extend(s.errors.into_iter().map(|e| format!("{}: {e}", r.id)));
+                summary.offline |= s.offline;
+                if !s.offline {
+                    synced.push(r.id.clone());
+                }
+            }
+            Err(e) => summary.errors.push(format!("{}: {e}", r.id)),
+        }
+    }
+    if !synced.is_empty() {
+        // Pull the changes into the index, then re-plan reminders (ADR-005).
+        if let Err(e) = refresh(state) {
+            summary.errors.push(format!("index refresh: {e}"));
+        }
+    }
+    tracing::info!(
+        remotes = summary.remotes,
+        pushed = summary.pushed,
+        pulled = summary.pulled,
+        errors = summary.errors.len(),
+        "sync finished"
+    );
+    let mut book = state.lock_sync();
+    book.last_run = Some(now);
+    book.error = summary.errors.first().cloned();
+    for rid in synced {
+        book.per_remote.insert(rid, now);
+    }
+    book.last_report = Some(summary.clone());
+    Ok(summary)
+}
+
+/// Sync automatically if there are remotes, nothing is running and the last run is old enough
+/// for this trigger. Returns whether a run happened; failures are kept in [`sync_status`].
+pub fn sync_auto(state: &AppState, reason: AutoSync) -> bool {
+    sync_auto_at(state, reason, now_secs())
+}
+
+/// [`sync_auto`] at an explicit time.
+pub fn sync_auto_at(state: &AppState, reason: AutoSync, now: i64) -> bool {
+    let Ok(local) = vault_local(state) else {
+        return false;
+    };
+    match RemotesFile::load(&local) {
+        Ok(f) if !f.remotes.is_empty() => {}
+        _ => return false,
+    }
+    if state.sync_running.load(Ordering::Acquire) {
+        return false;
+    }
+    let recent = state
+        .lock_sync()
+        .last_run
+        .is_some_and(|t| now - t < reason.min_age_secs());
+    if recent {
+        return false;
+    }
+    match sync_now_at(state, None, now) {
+        Ok(_) => true,
+        Err(err) => {
+            // Includes losing a race with another run; only the message is kept.
+            tracing::warn!(%err, "automatic sync did not run");
+            let mut book = state.lock_sync();
+            if !matches!(err, CmdError::Remote(ref m) if m.contains("already running")) {
+                book.error = Some(err.to_string());
+            }
+            false
+        }
+    }
+}
+
+/// Current sync state. Works without a vault (everything empty).
+#[must_use]
+pub fn sync_status(state: &AppState) -> SyncStatusDto {
+    let (remotes, pending_count) = match vault_local(state) {
+        Ok(local) => (
+            RemotesFile::load(&local).map_or(0, |f| f.remotes.len()),
+            pending(&local).len(),
+        ),
+        Err(_) => (0, 0),
+    };
+    let book = state.lock_sync();
+    SyncStatusDto {
+        running: state.sync_running.load(Ordering::Acquire),
+        remotes,
+        last_run: book.last_run,
+        last_report: book.last_report.clone(),
+        pending: pending_count,
+        error: book.error.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -1526,6 +1891,203 @@ mod tests {
 
     fn names(nodes: &[PageNode]) -> Vec<String> {
         nodes.iter().map(|n| n.name.clone()).collect()
+    }
+
+    // ---- cloud sync
+
+    use selenite_core::VaultPath as Vp;
+    use selenite_storage::{Entry, MemoryStorage, StorageProvider, WriteMode};
+    use std::sync::{Arc, Mutex};
+
+    struct Shared(Arc<MemoryStorage>);
+
+    impl StorageProvider for Shared {
+        fn kind(&self) -> &'static str {
+            "memory"
+        }
+        fn list(&self) -> selenite_storage::Result<Vec<Entry>> {
+            self.0.list()
+        }
+        fn list_dirs(&self) -> selenite_storage::Result<Vec<Vp>> {
+            self.0.list_dirs()
+        }
+        fn stat(&self, p: &Vp) -> selenite_storage::Result<Option<Entry>> {
+            self.0.stat(p)
+        }
+        fn read(&self, p: &Vp) -> selenite_storage::Result<Vec<u8>> {
+            self.0.read(p)
+        }
+        fn write(&self, p: &Vp, d: &[u8], m: WriteMode) -> selenite_storage::Result<Entry> {
+            self.0.write(p, d, m)
+        }
+        fn rename(&self, a: &Vp, b: &Vp) -> selenite_storage::Result<Entry> {
+            self.0.rename(a, b)
+        }
+        fn trash(&self, p: &Vp) -> selenite_storage::Result<Vp> {
+            self.0.trash(p)
+        }
+        fn create_dir(&self, p: &Vp) -> selenite_storage::Result<()> {
+            self.0.create_dir(p)
+        }
+    }
+
+    struct FakeRemotes {
+        mem: Arc<MemoryStorage>,
+        forgotten: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl crate::state::RemoteFactory for FakeRemotes {
+        fn open(&self, _r: &RemoteConfig) -> Result<Box<dyn StorageProvider>, String> {
+            Ok(Box::new(Shared(Arc::clone(&self.mem))))
+        }
+        fn forget(&self, r: &RemoteConfig) -> Result<(), String> {
+            self.forgotten.lock().unwrap().push(r.id.clone());
+            Ok(())
+        }
+    }
+
+    type SyncFixture = (
+        tempfile::TempDir,
+        AppState,
+        Arc<MemoryStorage>,
+        Arc<Mutex<Vec<String>>>,
+    );
+
+    fn sync_fixture() -> SyncFixture {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = Arc::new(MemoryStorage::new());
+        let forgotten = Arc::new(Mutex::new(Vec::new()));
+        let state = AppState::new(dir.path().join("cfg").join("settings.json")).with_remotes(
+            Box::new(FakeRemotes {
+                mem: Arc::clone(&mem),
+                forgotten: Arc::clone(&forgotten),
+            }),
+        );
+        let vault = dir.path().join("vault");
+        create_vault(&state, vault.to_str().unwrap()).unwrap();
+        (dir, state, mem, forgotten)
+    }
+
+    fn add_remote(state: &AppState) {
+        let local = vault_local(state).unwrap();
+        let mut f = RemotesFile::load(&local).unwrap();
+        f.remotes.push(RemoteConfig {
+            id: "gdrive-1".into(),
+            provider: Provider::GoogleDrive,
+            folder: "Notes".into(),
+            account_hint: None,
+        });
+        f.save(&local).unwrap();
+    }
+
+    #[test]
+    fn sync_status_default_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().join("settings.json"));
+        let s = sync_status(&state);
+        assert!(!s.running);
+        assert_eq!(s.remotes, 0);
+        assert!(s.last_run.is_none() && s.last_report.is_none() && s.error.is_none());
+        assert_eq!(s.pending, 0);
+        // With a vault but no remotes nothing runs, even automatically.
+        let (_d, state, _m, _f) = sync_fixture();
+        assert!(remotes_list(&state).unwrap().is_empty());
+        assert!(!sync_auto(&state, AutoSync::Open));
+        assert!(sync_now(&state, None).unwrap().remotes == 0);
+    }
+
+    #[test]
+    fn remotes_file_handling_and_disconnect() {
+        let (_d, state, _m, forgotten) = sync_fixture();
+        add_remote(&state);
+        let list = remotes_list(&state).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].provider, "google-drive");
+        assert_eq!(list[0].provider_label, "Google Drive");
+        assert!(list[0].last_sync.is_none());
+        assert!(sync_now(&state, Some("nope")).is_err());
+        remote_disconnect(&state, "gdrive-1").unwrap();
+        assert!(remotes_list(&state).unwrap().is_empty());
+        assert_eq!(forgotten.lock().unwrap().as_slice(), ["gdrive-1"]);
+        assert!(remote_disconnect(&state, "gdrive-1").is_err());
+    }
+
+    #[test]
+    fn connect_without_client_id_fails_before_opening_a_browser() {
+        let (_d, state, _m, _f) = sync_fixture();
+        let opened = std::cell::Cell::new(false);
+        let open = |_: &str| {
+            opened.set(true);
+            Ok(())
+        };
+        let none = |_: &str| None;
+        let err = remote_connect_with(
+            &state,
+            Provider::OneDrive,
+            None,
+            selenite_sync::remote::client_config_with(
+                Provider::OneDrive,
+                &none,
+                selenite_sync::remote::CompiledIds::default(),
+            ),
+            &|_, _| Arc::new(selenite_storage::oauth::MemoryTokenStore::new()),
+            &open,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not configured for this build"));
+        assert!(!opened.get());
+        assert!(remotes_list(&state).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sync_now_round_trip_pulls_indexes_and_pushes() {
+        let (_d, state, mem, _f) = sync_fixture();
+        add_remote(&state);
+        mem.write(
+            &Vp::new("Remote note.md").unwrap(),
+            b"# Remote note\n\nquokka\n",
+            WriteMode::CreateNew,
+        )
+        .unwrap();
+        let local_page = create_page(&state, "Local note", None).unwrap();
+        assert!(search(&state, "quokka", 5).unwrap().is_empty());
+
+        let s = sync_now_at(&state, None, 1_000).unwrap();
+        assert_eq!(s.remotes, 1);
+        assert_eq!(s.pulled, 1, "{s:?}");
+        assert!(s.pushed >= 1, "{s:?}");
+        assert!(s.errors.is_empty() && !s.offline, "{s:?}");
+        // Engine::refresh ran: the remote-only file is searchable.
+        assert_eq!(search(&state, "quokka", 5).unwrap().len(), 1);
+        // The local page reached the remote.
+        assert!(mem.stat(&Vp::new(&local_page).unwrap()).unwrap().is_some());
+
+        let st = sync_status(&state);
+        assert_eq!(st.last_run, Some(1_000));
+        assert_eq!(st.last_report.as_ref().map(|r| r.pulled), Some(1));
+        assert_eq!(st.pending, 0);
+        assert!(st.error.is_none());
+        assert_eq!(remotes_list(&state).unwrap()[0].last_sync, Some(1_000));
+
+        // Auto-sync respects the one-minute focus gap but not the open trigger.
+        assert!(!sync_auto_at(&state, AutoSync::Focus, 1_030));
+        assert!(sync_auto_at(&state, AutoSync::Focus, 1_061));
+        assert!(sync_auto_at(&state, AutoSync::Tick, 1_062));
+    }
+
+    #[test]
+    fn sync_runs_never_overlap() {
+        let (_d, state, _m, _f) = sync_fixture();
+        add_remote(&state);
+        let _held = RunGuard::acquire(&state.sync_running).unwrap();
+        assert!(
+            sync_now(&state, None)
+                .unwrap_err()
+                .to_string()
+                .contains("already running")
+        );
+        assert!(!sync_auto(&state, AutoSync::Open));
+        assert!(sync_status(&state).running);
     }
 
     #[test]

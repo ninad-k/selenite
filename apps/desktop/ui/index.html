@@ -29,6 +29,8 @@
       <aside class="sidebar" aria-label="Sidebar">
         <div class="vault-head">
           <span id="vault-name" class="vault-name"></span>
+          <button id="btn-settings" type="button" class="gear" aria-label="Settings"
+                  title="Settings">⚙</button>
         </div>
         <div id="mode-switch" class="segmented" role="group" aria-label="Mode"></div>
         <div id="vault-actions" class="side-actions">
@@ -102,6 +104,7 @@
         </section>
         <footer class="statusbar">
           <span id="status-path" class="status-path"></span>
+          <button id="status-sync" type="button" class="status-sync" hidden></button>
           <span id="status-reminders" class="status-reminders" role="status"></span>
           <span id="status-state" class="status-state" role="status" aria-live="polite"></span>
         </footer>

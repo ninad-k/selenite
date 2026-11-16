@@ -208,6 +208,39 @@ export interface DatabaseSchemaJson {
   [k: string]: unknown;
 }
 
+// ---- Cloud sync
+export interface RemoteInfo {
+  id: string;
+  provider: string;
+  provider_label: string;
+  folder: string;
+  account_hint: string | null;
+  last_sync: number | null;
+}
+export interface ConflictCopy {
+  path: string;
+  copy_path: string;
+  local_copy_path: string;
+}
+export interface SyncSummary {
+  remotes: number;
+  pushed: number;
+  pulled: number;
+  trashed: number;
+  conflicts: ConflictCopy[];
+  unresolved: string[];
+  errors: string[];
+  offline: boolean;
+}
+export interface SyncStatus {
+  running: boolean;
+  remotes: number;
+  last_run: number | null;
+  last_report: SyncSummary | null;
+  pending: number;
+  error: string | null;
+}
+
 /** Thin wrappers over Tauri commands. Errors arrive as plain strings. */
 export const api = {
   appInfo: () => invoke<AppInfo>("app_info"),
@@ -267,6 +300,13 @@ export const api = {
     invoke<string>("row_create", { folder, title, values }),
   rowSet: (path: string, property: string, value: CellValue) =>
     invoke<void>("row_set", { path, property, value }),
+  remotesList: () => invoke<RemoteInfo[]>("remotes_list"),
+  remoteConnect: (provider: string, folder: string | null) =>
+    invoke<RemoteInfo>("remote_connect", { provider, folder }),
+  remoteDisconnect: (id: string) => invoke<void>("remote_disconnect", { id }),
+  syncNow: (id: string | null) => invoke<SyncSummary>("sync_now", { id }),
+  syncStatus: () => invoke<SyncStatus>("sync_status"),
+  syncAuto: (reason: "open" | "focus") => invoke<boolean>("sync_auto", { reason }),
 };
 
 export function errorText(err: unknown): string {

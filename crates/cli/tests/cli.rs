@@ -125,11 +125,35 @@ fn daily_prints_the_dated_path() {
 }
 
 #[test]
-fn sync_is_reserved_and_exits_with_code_2() {
+fn sync_without_remotes_explains_and_exits_zero() {
     let (_tmp, root) = new_vault();
     let out = vault_cmd(&root, &["sync"]);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(stderr(&out).contains("not available until a later phase"));
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("selenite remote add"));
+    let out = vault_cmd(&root, &["remote", "list"]);
+    assert!(out.status.success());
+    assert!(stdout(&out).contains("No remotes"));
+}
+
+#[test]
+fn remote_add_without_client_ids_fails_cleanly() {
+    let (_tmp, root) = new_vault();
+    let out = selenite()
+        .arg("--vault")
+        .arg(&root)
+        .args(["remote", "add", "google-drive"])
+        .env_remove("SELENITE_GOOGLE_CLIENT_ID")
+        .env_remove("SELENITE_GOOGLE_CLIENT_SECRET")
+        .env_remove("SELENITE_TEST_GOOGLE_CLIENT_ID")
+        .env_remove("SELENITE_TEST_GOOGLE_CLIENT_SECRET")
+        .output()
+        .unwrap();
+    // A build that bakes in ids (release) would try the browser; only assert for dev builds.
+    if option_env!("SELENITE_GOOGLE_CLIENT_ID").is_none() {
+        assert_eq!(out.status.code(), Some(1));
+        assert!(stderr(&out).contains("sign-in is not configured for this build"));
+        assert!(!root.join(".selenite").join("remotes.yaml").exists());
+    }
 }
 
 fn json_of(out: &Output) -> serde_json::Value {
