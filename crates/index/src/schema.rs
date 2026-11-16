@@ -55,6 +55,20 @@ CREATE TABLE properties (
 CREATE INDEX properties_page ON properties(page_id);
 CREATE INDEX properties_key ON properties(key);
 
+CREATE TABLE meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE tasks (
+    page_id    INTEGER PRIMARY KEY REFERENCES pages(id) ON DELETE CASCADE,
+    done       INTEGER NOT NULL,
+    due        TEXT,
+    project    TEXT,
+    fields     TEXT NOT NULL
+);
+CREATE INDEX tasks_due ON tasks(done, due);
+
 CREATE VIRTUAL TABLE fts USING fts5(
     title,
     body,

@@ -20,6 +20,8 @@ pub struct VaultConfig {
     pub daily_folder: String,
     /// `chrono` format string for daily note file names (without extension).
     pub daily_format: String,
+    /// Default Tasks database folder (vault-relative) used by quick add.
+    pub tasks_folder: String,
     /// Config schema version.
     pub version: u32,
 }
@@ -31,6 +33,7 @@ impl Default for VaultConfig {
             mode_names: ModeNames::default(),
             daily_folder: "Daily".into(),
             daily_format: "%Y-%m-%d".into(),
+            tasks_folder: "Tasks".into(),
             version: 1,
         }
     }

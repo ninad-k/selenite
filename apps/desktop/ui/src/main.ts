@@ -1,6 +1,7 @@
 import "./styles.css";
 import { api, errorText, type TreeNode, type VaultInfo } from "./api";
 import { createEditor, type EditorHandle } from "./editor";
+import { enterTasks, initTasks, leaveTasks, refreshReminders, reloadTasks } from "./tasks";
 
 const HL_START = "";
 const HL_END = "";
@@ -157,6 +158,8 @@ async function reloadPage(): Promise<void> {
 }
 
 async function loadPage(path: string, force = false): Promise<void> {
+  // Pages are edited in Vault mode; opening one from another mode switches to it first.
+  if (app.vault && app.vault.mode_id !== "vault") await switchMode("vault");
   if (!force && app.path === path) {
     app.editor?.focus();
     return;
@@ -496,7 +499,6 @@ async function enterVault(info: VaultInfo): Promise<void> {
   $("app").hidden = false;
   $("vault-name").textContent = info.name || info.root;
   $("vault-name").title = info.root;
-  $("mode").textContent = info.mode_label;
   $("status-path").textContent = "";
   $("empty").hidden = false;
   $("editor").hidden = true;
@@ -508,9 +510,60 @@ async function enterVault(info: VaultInfo): Promise<void> {
       onLinkClick: (t) => void openTarget(t),
     });
   }
+  applyMode(info);
   await Promise.all([refreshTree(), refreshTags(), refreshLinks()]);
   const first = treeData?.children.find((c) => !c.is_dir && c.name.endsWith(".md"));
-  if (first && !app.path) await loadPage(first.path);
+  if (first && !app.path && info.mode_id === "vault") await loadPage(first.path);
+}
+
+// ---------------------------------------------------------------- modes
+
+function renderModeSwitch(info: VaultInfo): void {
+  const host = $("mode-switch");
+  host.replaceChildren();
+  for (const m of info.modes) {
+    const b = h("button", { type: "button", text: m.label });
+    b.setAttribute("aria-pressed", String(m.id === info.mode_id));
+    b.addEventListener("click", () => {
+      if (m.id !== app.vault?.mode_id) void switchMode(m.id);
+    });
+    host.append(b);
+  }
+}
+
+/** Show the shell that belongs to the vault's current mode. Data is never touched. */
+function applyMode(info: VaultInfo): void {
+  app.vault = info;
+  const vault = info.mode_id === "vault";
+  const workspace = info.mode_id === "workspace";
+  const tasks = info.mode_id === "tasks";
+  $("app").dataset.mode = info.mode_id;
+  renderModeSwitch(info);
+  $("vault-main").hidden = !vault;
+  $("workspace-panel").hidden = !workspace;
+  $("tasks-main").hidden = !tasks;
+  $("links-panel").hidden = !vault;
+  $("drawer").hidden = !tasks;
+  $("vault-actions").hidden = tasks;
+  $("tree").hidden = tasks;
+  $("tags-section").hidden = tasks;
+  $("tasks-nav").hidden = !tasks;
+  $("status-path").hidden = !vault;
+  $("status-state").hidden = !vault;
+  if (tasks) void enterTasks();
+  else {
+    leaveTasks();
+    void refreshReminders();
+  }
+}
+
+async function switchMode(id: string): Promise<void> {
+  try {
+    await flushSave();
+    applyMode(await api.setMode(id));
+  } catch (err) {
+    showBanner(`Could not switch mode: ${errorText(err)}`);
+  }
 }
 
 async function showWelcome(): Promise<void> {
@@ -551,6 +604,8 @@ async function onWindowFocus(): Promise<void> {
   try {
     await api.refresh();
     await Promise.all([refreshTree(), refreshTags(), refreshLinks()]);
+    if (app.vault.mode_id === "tasks") await reloadTasks();
+    else await refreshReminders();
     // Pick up outside edits when nothing of ours is pending.
     if (app.path && app.state === "saved" && app.version === app.savedVersion && !app.saving) {
       const page = await api.readPage(app.path);
@@ -636,6 +691,7 @@ async function init(): Promise<void> {
     })();
   });
   $("banner-close").addEventListener("click", hideBanner);
+  initTasks({ openAsPage: (path) => void loadPage(path) });
   wireDialog();
   wireTabs();
   wireShortcuts();

@@ -29,15 +29,37 @@
       <aside class="sidebar" aria-label="Sidebar">
         <div class="vault-head">
           <span id="vault-name" class="vault-name"></span>
-          <span id="mode" class="mode"></span>
         </div>
-        <div class="side-actions">
+        <div id="mode-switch" class="segmented" role="group" aria-label="Mode"></div>
+        <div id="vault-actions" class="side-actions">
           <button id="btn-new" type="button" aria-label="New page">New page</button>
           <button id="btn-today" type="button" aria-label="Open today's daily note">Today</button>
           <button id="btn-search" type="button" aria-label="Search the vault">Search</button>
         </div>
         <nav id="tree" class="tree" aria-label="Files"></nav>
-        <section class="tags" aria-labelledby="tags-title">
+        <nav id="tasks-nav" class="tasks-nav" aria-label="Task lists" hidden>
+          <ul id="nav-main" class="nav-list"></ul>
+          <h2>Projects</h2>
+          <ul id="nav-projects" class="nav-list"></ul>
+          <h2>Labels</h2>
+          <div id="nav-labels" class="tag-list"></div>
+          <h2>Saved views</h2>
+          <ul id="nav-views" class="nav-list"></ul>
+          <ul id="nav-end" class="nav-list"></ul>
+          <form id="filter-form" class="filter-form">
+            <label for="filter-input" class="field-label">Custom filter</label>
+            <input id="filter-input" type="text" spellcheck="false" autocomplete="off"
+                   placeholder="Custom filter…" />
+            <input id="view-name" type="text" autocomplete="off" aria-label="Saved view name"
+                   placeholder="View name" hidden />
+            <div class="row">
+              <button type="submit">Run</button>
+              <button id="btn-save-view" type="button">Save view</button>
+            </div>
+            <p id="filter-msg" class="small muted" role="status"></p>
+          </form>
+        </nav>
+        <section id="tags-section" class="tags" aria-labelledby="tags-title">
           <h2 id="tags-title">Tags</h2>
           <div id="tags" class="tag-list"></div>
         </section>
@@ -49,17 +71,86 @@
           <button id="banner-action" type="button" hidden></button>
           <button id="banner-close" type="button" aria-label="Dismiss message">Dismiss</button>
         </div>
-        <div class="editor-wrap">
+        <div id="vault-main" class="editor-wrap">
           <div id="editor" class="editor" aria-label="Page editor"></div>
           <p id="empty" class="empty">Open a page from the list, or press Ctrl+O to jump to one.</p>
         </div>
+        <section id="workspace-panel" class="placeholder" aria-labelledby="ws-title" hidden>
+          <h1 id="ws-title">Not built yet</h1>
+          <p class="muted">This mode arrives in a later phase. Your files are untouched and still
+            listed on the left; switch to another mode to keep working with them.</p>
+        </section>
+        <section id="tasks-main" class="tasks-main" aria-label="Tasks" hidden>
+          <header class="tasks-head">
+            <h1 id="tasks-title"></h1>
+            <div id="layout-toggle" class="segmented small-seg" role="group" aria-label="Layout"
+                 hidden></div>
+          </header>
+          <form id="quickadd-form" class="quickadd">
+            <label for="quickadd" class="sr-only">Quick add a task</label>
+            <input id="quickadd" type="text" spellcheck="false" autocomplete="off"
+                   placeholder="Add a task, e.g. Pay rent every 1st at 9am p1 #home  (press q)" />
+          </form>
+          <ul id="quickadd-warnings" class="warnings" aria-label="Quick add warnings"></ul>
+          <p id="task-msg" class="task-msg" role="status" aria-live="polite"></p>
+          <div id="task-list" class="task-list"></div>
+        </section>
         <footer class="statusbar">
           <span id="status-path" class="status-path"></span>
+          <span id="status-reminders" class="status-reminders" role="status"></span>
           <span id="status-state" class="status-state" role="status" aria-live="polite"></span>
         </footer>
       </main>
 
-      <aside class="panel" aria-label="Links">
+      <aside id="drawer" class="panel drawer" aria-label="Task details" hidden>
+        <p id="drawer-empty" class="muted pad">Select a task and press Enter to see its details.</p>
+        <form id="drawer-form" class="drawer-form" hidden>
+          <label for="d-title" class="field-label">Title</label>
+          <input id="d-title" type="text" autocomplete="off" />
+          <div class="two">
+            <div>
+              <label for="d-priority" class="field-label">Priority</label>
+              <select id="d-priority">
+                <option value="1">p1 (urgent)</option>
+                <option value="2">p2 (high)</option>
+                <option value="3">p3 (medium)</option>
+                <option value="4">p4 (none)</option>
+              </select>
+            </div>
+            <div>
+              <label for="d-section" class="field-label">Section</label>
+              <input id="d-section" type="text" autocomplete="off" />
+            </div>
+          </div>
+          <div class="two">
+            <div>
+              <label for="d-date" class="field-label">Due date</label>
+              <input id="d-date" type="date" />
+            </div>
+            <div>
+              <label for="d-time" class="field-label">Time (optional)</label>
+              <input id="d-time" type="time" />
+            </div>
+          </div>
+          <p id="d-repeat" class="small muted"></p>
+          <label for="d-project" class="field-label">Project</label>
+          <input id="d-project" type="text" autocomplete="off" list="d-projects" />
+          <datalist id="d-projects"></datalist>
+          <label for="d-labels" class="field-label">Labels (comma separated)</label>
+          <input id="d-labels" type="text" autocomplete="off" />
+          <label for="d-reminders" class="field-label">Reminders (comma separated)</label>
+          <input id="d-reminders" type="text" autocomplete="off" placeholder="-15m, 2026-11-20T08:45" />
+          <p id="d-error" class="error" role="alert" hidden></p>
+          <div class="row">
+            <button id="d-save" type="submit" class="primary">Save</button>
+            <button id="d-archive" type="button">Archive</button>
+          </div>
+          <p class="small"><a id="d-open" href="#" role="button">Open as page</a></p>
+          <p id="d-path" class="small muted path-text"></p>
+        </form>
+      </aside>
+
+      <aside id="links-panel" class="panel" aria-label="Links">
         <div class="tabs" role="tablist" aria-label="Link panels">
           <button id="tab-back" type="button" role="tab" aria-selected="true"
                   aria-controls="list-back">Backlinks</button>

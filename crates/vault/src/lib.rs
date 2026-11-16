@@ -8,10 +8,12 @@ pub mod config;
 pub mod document;
 pub mod layout;
 pub mod links;
+pub mod schema;
 
 pub use config::VaultConfig;
 pub use document::{Document, FrontMatter, PropertyValue};
 pub use links::{Heading, Link, extract_headings, extract_links, extract_tags, normalize_target};
+pub use schema::{DatabaseKind, DatabaseSchema, SCHEMA_FILE, SavedView};
 
 /// Errors produced while parsing or serialising vault files.
 #[derive(Debug, thiserror::Error)]

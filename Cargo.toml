@@ -55,6 +55,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 criterion = "0.8"
+windows = "0.62"
 
 [workspace.lints.rust]
 missing_docs = "warn"
