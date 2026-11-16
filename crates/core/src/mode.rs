@@ -31,6 +31,7 @@ impl Mode {
 
 /// User-configurable display names for each mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ModeNames {
     /// Label for [`Mode::Vault`].
     pub vault: String,
