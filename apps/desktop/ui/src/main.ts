@@ -4,6 +4,7 @@ import { api, errorText, type TreeNode, type VaultInfo } from "./api";
 import { createEditor, type EditorHandle } from "./editor";
 import { enterWorkspace, initWorkspace, leaveWorkspace, reloadWorkspace } from "./workspace";
 import { enterTasks, initTasks, leaveTasks, refreshReminders, reloadTasks } from "./tasks";
+import { initStorage, onFocusSync, onVaultOpened } from "./storage";
 
 const HL_START = "";
 const HL_END = "";
@@ -516,6 +517,29 @@ async function enterVault(info: VaultInfo): Promise<void> {
   await Promise.all([refreshTree(), refreshTags(), refreshLinks()]);
   const first = treeData?.children.find((c) => !c.is_dir && c.name.endsWith(".md"));
   if (first && !app.path && info.mode_id === "vault") await loadPage(first.path);
+  void onVaultOpened();
+}
+
+/** A sync changed files or the index: reload what is on screen (the backend already refreshed). */
+async function onSyncChanged(): Promise<void> {
+  if (!app.vault || $("app").hidden) return;
+  try {
+    await Promise.all([refreshTree(), refreshTags(), refreshLinks()]);
+    if (app.vault.mode_id === "workspace") await reloadWorkspace();
+    if (app.vault.mode_id === "tasks") await reloadTasks();
+    else await refreshReminders();
+    if (app.path && app.state === "saved" && app.version === app.savedVersion && !app.saving) {
+      const page = await api.readPage(app.path);
+      if (page.revision !== app.revision && app.version === app.savedVersion) {
+        app.loading = true;
+        app.revision = page.revision;
+        app.editor?.setText(page.text);
+        app.loading = false;
+      }
+    }
+  } catch {
+    // a failed reload must not disturb editing
+  }
 }
 
 // ---------------------------------------------------------------- modes
@@ -607,6 +631,7 @@ async function welcomeAction(kind: "open" | "create", path: string): Promise<voi
 
 async function onWindowFocus(): Promise<void> {
   if (!app.vault || $("app").hidden) return;
+  void onFocusSync();
   try {
     await api.refresh();
     await Promise.all([refreshTree(), refreshTags(), refreshLinks()]);
@@ -703,6 +728,11 @@ async function init(): Promise<void> {
     banner: showBanner,
     openTasks: () => void switchMode("tasks"),
     flush: flushSave,
+  });
+  initStorage({
+    openPage: (path) => void loadPage(path),
+    banner: showBanner,
+    afterSync: () => void onSyncChanged(),
   });
   wireDialog();
   wireTabs();

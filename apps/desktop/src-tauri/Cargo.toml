@@ -30,6 +30,7 @@ selenite-vault = { workspace = true }
 selenite-storage = { workspace = true }
 selenite-index = { workspace = true }
 selenite-reminders = { workspace = true }
+selenite-sync = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

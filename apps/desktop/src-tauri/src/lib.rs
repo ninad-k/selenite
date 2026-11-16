@@ -5,14 +5,14 @@ pub mod commands;
 pub mod state;
 
 use selenite_index::{BlockPage, DatabaseInfo, TreeNode, ViewResult};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 use commands::{
-    AgendaDto, AppInfo, BacklinkDto, BlockTypeDto, CmdError, OutLinkDto, PageContent, PageNode,
-    ProjectDto, QuickAddResult, SaveResult, SearchHitDto, TagDto, TaskDetail, TaskDto, VaultInfo,
-    ViewDto,
+    AgendaDto, AppInfo, AutoSync, BacklinkDto, BlockTypeDto, CmdError, OutLinkDto, PageContent,
+    PageNode, ProjectDto, QuickAddResult, RemoteDto, SaveResult, SearchHitDto, SyncStatusDto,
+    TagDto, TaskDetail, TaskDto, VaultInfo, ViewDto,
 };
-use state::{AppState, RemindersStatus};
+use state::{AppState, RemindersStatus, SyncSummary};
 
 /// Build the [`AppInfo`] value from core constants and crate metadata.
 #[must_use]
@@ -330,6 +330,90 @@ fn row_set(
     s(commands::row_set(&state, &path, &property, &value))
 }
 
+/// Tell the UI that sync state (and possibly vault files) changed.
+fn notify_sync(app: &tauri::AppHandle) {
+    let _ = app.emit("sync-changed", ());
+}
+
+#[tauri::command]
+fn remotes_list(state: State<'_, AppState>) -> Result<Vec<RemoteDto>, String> {
+    s(commands::remotes_list(&state))
+}
+
+/// Runs the browser sign-in on a worker thread so the UI stays responsive.
+#[tauri::command]
+async fn remote_connect(
+    app: tauri::AppHandle,
+    provider: String,
+    folder: Option<String>,
+) -> Result<RemoteDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        commands::remote_connect(&state, &provider, folder.as_deref()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn remote_disconnect(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    s(commands::remote_disconnect(&state, &id))
+}
+
+/// Syncs one remote (or all) on a worker thread; the engine lock is only taken for the refresh.
+#[tauri::command]
+async fn sync_now(app: tauri::AppHandle, id: Option<String>) -> Result<SyncSummary, String> {
+    let handle = app.clone();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<AppState>();
+        commands::sync_now(&state, id.as_deref()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    notify_sync(&app);
+    out
+}
+
+#[tauri::command]
+fn sync_status(state: State<'_, AppState>) -> SyncStatusDto {
+    commands::sync_status(&state)
+}
+
+/// Automatic sync trigger (`open` or `focus`); returns whether a run happened.
+#[tauri::command]
+async fn sync_auto(app: tauri::AppHandle, reason: String) -> Result<bool, String> {
+    let handle = app.clone();
+    let ran = tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<AppState>();
+        commands::sync_auto(&state, AutoSync::parse(&reason))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    if ran {
+        notify_sync(&app);
+    }
+    Ok(ran)
+}
+
+/// Background timer: sync every five minutes while the app runs.
+fn start_sync_timer(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(
+                commands::AUTO_SYNC_INTERVAL_SECS,
+            ));
+            let ran = {
+                let state = handle.state::<AppState>();
+                commands::sync_auto(&state, AutoSync::Tick)
+            };
+            if ran {
+                notify_sync(&handle);
+            }
+        }
+    });
+}
+
 fn asset_response(app: &tauri::AppHandle, request_path: &str) -> tauri::http::Response<Vec<u8>> {
     let builder = tauri::http::Response::builder().header("Access-Control-Allow-Origin", "*");
     let state = app.state::<AppState>();
@@ -365,6 +449,7 @@ pub fn run() -> Result<(), tauri::Error> {
             // Opening the remembered vault re-plans reminders (the startup re-plan).
             commands::open_last_vault(&state);
             app.manage(state);
+            start_sync_timer(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -413,7 +498,13 @@ pub fn run() -> Result<(), tauri::Error> {
             database_create,
             database_schema_save,
             row_create,
-            row_set
+            row_set,
+            remotes_list,
+            remote_connect,
+            remote_disconnect,
+            sync_now,
+            sync_status,
+            sync_auto
         ])
         .run(tauri::generate_context!())
 }
