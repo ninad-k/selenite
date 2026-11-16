@@ -14,3 +14,6 @@
 Rust: thiserror, anyhow, serde, serde_json, serde_norway, rusqlite (bundled, FTS5), pulldown-cmark,
 clap, tempfile, walkdir, blake3, chrono, tracing, tracing-subscriber, criterion, tauri 2, tauri-build 2,
 rmcp (Phase 3). UI: vite, typescript, @tauri-apps/api, CodeMirror 6. Anything else needs approval.
+
+Later phases (owner, 2026-11-16): windows (scheduled toasts), tokio, schemars, rmcp transports (axum/hyper),
+reqwest (rustls), keyring, sha2, base64, rand, tauri-plugin-notification, zip, csv.

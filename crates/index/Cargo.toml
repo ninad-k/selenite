@@ -1,6 +1,6 @@
 [package]
 name = "selenite-index"
-description = "Disposable SQLite cache: links, backlinks, tags, properties, tasks, FTS5 search."
+description = "Disposable SQLite cache: links, backlinks, tags, properties, tasks, FTS5 search; and the Engine facade."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,4 +11,19 @@ workspace = true
 
 [dependencies]
 selenite-core = { workspace = true }
+selenite-vault = { workspace = true }
+selenite-storage = { workspace = true }
 thiserror = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "search"
+harness = false

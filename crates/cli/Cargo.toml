@@ -15,5 +15,15 @@ path = "src/main.rs"
 
 [dependencies]
 selenite-core = { workspace = true }
+selenite-index = { workspace = true }
+selenite-vault = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
