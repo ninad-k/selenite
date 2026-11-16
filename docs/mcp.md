@@ -39,13 +39,21 @@ Any client that takes a JSON server list:
 | `complete_task` / `reopen_task` | yes | Complete (recurring tasks advance) / reopen |
 | `set_reminder` | yes | Replace a task's reminders (`-15m`, `2026-11-20T08:45`) |
 | `get_agenda` | | Overdue plus N days, recurring tasks expanded |
-| `query_database` | | Filter a Tasks database (table databases arrive in Phase 4) |
+| `query_database` | | Tasks database: `filter` (list_tasks syntax). Table database: `view` (saved view name) and/or `query` (`{filter, sorts, group_by}`); returns rows with computed values and `groups` |
+| `list_databases` | | Databases in the vault: folder, kind (`table` or `tasks`), row count |
+| `get_database_schema` | | A database's properties, views and schema revision |
+| `create_database` | yes | New table database in a folder: `Name` title plus `properties` (`[{"name", "type", ...}]`) and a default Table view |
+| `update_database_schema` | yes | Replace `properties` and/or `views` of a table database; validated, invalid schemas are rejected without writing |
+| `create_row` | yes | New row (Markdown file) in a table database with `values`; computed properties are ignored |
+| `set_row_property` | yes | Set one stored property of a row (`value: null` clears); the body is untouched |
 | `daily_note` | yes (if created) | Open or create a daily note |
 | `list_tags`, `get_tree` | | Tags with counts, file tree |
-| `archive_task`, `archive_page` | yes | Move to `.selenite/trash/` |
+| `archive_task`, `archive_page` | yes | Move to `.selenite/trash/` (also how a row is removed) |
 
 There is **no delete tool**: agents can archive, never destroy. Every write accepts an optional
-`revision`; a stale revision returns a conflict instead of overwriting.
+`revision` where it makes sense (page and schema writes); a stale revision returns a conflict
+instead of overwriting. Schema and row values are validated by the engine; a rejected write is a
+tool error (`isError`) and changes nothing.
 
 Resources: every page as `vault:///<path>`. Prompt: `daily_review`.
 
