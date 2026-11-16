@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use anyhow::{Result, bail};
 use chrono::{Duration, NaiveDate, NaiveDateTime};
 use clap::{Parser, Subcommand, ValueEnum};
-use selenite_core::{APP_NAME, Due, Priority, TaskFields, VaultPath};
+use selenite_core::{Due, Priority, TaskFields, VaultPath};
 use selenite_index::{Engine, HIGHLIGHT_END, HIGHLIGHT_START, TaskItem};
 use selenite_reminders::{PlannerInput, WINDOW_DAYS, plan};
 use selenite_storage::oauth::default_open_browser;
@@ -101,12 +101,18 @@ enum Command {
         #[command(subcommand)]
         command: RemoteCommand,
     },
-    /// Import notes from another app (not available yet).
+    /// Import notes or tasks from another app into the vault.
     Import {
-        /// Source app name.
-        source: String,
-        /// Folder to import into.
+        /// Where the data comes from.
+        source: ImportSource,
+        /// Obsidian vault folder, Notion export (.zip or folder), or Todoist CSV (file or folder).
         path: PathBuf,
+        /// Vault folder to import into (default: Imported/<Source> <date>).
+        #[arg(long, value_name = "FOLDER")]
+        into: Option<String>,
+        /// Report what would happen without writing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Task commands (tasks are Markdown rows in the Tasks database).
     Task {
@@ -172,6 +178,52 @@ enum TaskCommand {
         #[arg(required = true, allow_hyphen_values = true, value_name = "FILTER")]
         filter: Vec<String>,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ImportSource {
+    Obsidian,
+    Notion,
+    Todoist,
+}
+
+fn cmd_import(
+    engine: &mut Engine,
+    json: bool,
+    source: ImportSource,
+    path: &std::path::Path,
+    into: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    let mut opts = selenite_import::ImportOptions::new(now());
+    opts.into = into;
+    opts.dry_run = dry_run;
+    let report = match source {
+        ImportSource::Obsidian => selenite_import::import_obsidian(engine, path, &opts)?,
+        ImportSource::Notion => selenite_import::import_notion(engine, path, &opts)?,
+        ImportSource::Todoist => selenite_import::import_todoist(engine, path, &opts)?,
+    };
+    if json {
+        return print_json(&report);
+    }
+    let verb = if report.dry_run {
+        "Would import"
+    } else {
+        "Imported"
+    };
+    println!(
+        "{verb} into {}: {} pages, {} rows, {} tasks, {} attachments, {} skipped",
+        report.target,
+        report.pages,
+        report.rows,
+        report.tasks,
+        report.attachments,
+        report.skipped.len()
+    );
+    for (p, reason) in &report.skipped {
+        println!("  skipped {p}: {reason}");
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -478,9 +530,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
             }
         }
-        Command::Import { .. } => {
-            eprintln!("error: {APP_NAME} import is not available until a later phase");
-            return Ok(ExitCode::from(2));
+        Command::Import {
+            source,
+            path,
+            into,
+            dry_run,
+        } => {
+            let mut engine = open()?;
+            cmd_import(&mut engine, json, source, &path, into, dry_run)?;
         }
         Command::Task { command } => {
             let mut engine = open()?;

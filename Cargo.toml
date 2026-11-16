@@ -8,6 +8,7 @@ members = [
     "crates/sync",
     "crates/reminders",
     "crates/mcp",
+    "crates/import",
     "crates/cli",
     "apps/server",
     "apps/desktop/src-tauri",
@@ -20,6 +21,7 @@ default-members = [
     "crates/sync",
     "crates/reminders",
     "crates/mcp",
+    "crates/import",
     "crates/cli",
     "apps/server",
 ]
@@ -39,6 +41,7 @@ selenite-index = { path = "crates/index" }
 selenite-sync = { path = "crates/sync" }
 selenite-reminders = { path = "crates/reminders" }
 selenite-mcp = { path = "crates/mcp" }
+selenite-import = { path = "crates/import" }
 
 thiserror = "2"
 anyhow = "1"
@@ -64,6 +67,8 @@ keyring = { version = "3.6", default-features = false }
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.9"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+csv = "1.4"
 
 [workspace.lints.rust]
 missing_docs = "warn"
