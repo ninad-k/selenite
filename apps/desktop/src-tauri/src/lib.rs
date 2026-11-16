@@ -2,6 +2,7 @@
 //! workspace crates; this crate only exposes it to the web UI.
 
 pub mod commands;
+pub mod mobile_notify;
 pub mod state;
 
 use selenite_index::{BlockPage, Citation, DatabaseInfo, TreeNode, ViewResult};
@@ -43,6 +44,18 @@ fn create_vault(state: State<'_, AppState>, path: String) -> Result<VaultInfo, S
 #[tauri::command]
 fn last_vault(state: State<'_, AppState>) -> Option<String> {
     commands::last_vault(&state)
+}
+
+/// A folder to suggest for a new vault: inside the app's own data folder on mobile, where the
+/// app may always write; `None` on the desktop, where the user types or picks a folder.
+#[tauri::command]
+fn suggested_vault(app: tauri::AppHandle) -> Option<String> {
+    if cfg!(mobile) {
+        let dir = app.path().app_data_dir().ok()?;
+        Some(dir.join("Vault").to_string_lossy().into_owned())
+    } else {
+        None
+    }
 }
 
 #[tauri::command]
@@ -500,12 +513,14 @@ fn plugin_frame_response(
 /// # Errors
 ///
 /// Returns a [`tauri::Error`] if the runtime fails to build or run.
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> Result<(), tauri::Error> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(mobile)]
+    let builder = builder.plugin(tauri_plugin_notification::init());
+    builder
         .register_uri_scheme_protocol("vault", |ctx, request| {
             asset_response(ctx.app_handle(), request.uri().path())
         })
@@ -514,7 +529,13 @@ pub fn run() -> Result<(), tauri::Error> {
         })
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
+            #[cfg(desktop)]
             let notifier = selenite_reminders::default_notifier(&app.config().identifier);
+            #[cfg(mobile)]
+            let notifier: Box<dyn selenite_reminders::Notifier> = {
+                request_notification_permission(app.handle());
+                Box::new(mobile_notify::MobileNotifier::new(app.handle().clone()))
+            };
             let state = AppState::with_notifier(dir.join("settings.json"), notifier);
             // Opening the remembered vault re-plans reminders (the startup re-plan).
             commands::open_last_vault(&state);
@@ -527,6 +548,7 @@ pub fn run() -> Result<(), tauri::Error> {
             open_vault,
             create_vault,
             last_vault,
+            suggested_vault,
             vault_info,
             tree,
             read_page,
@@ -583,6 +605,31 @@ pub fn run() -> Result<(), tauri::Error> {
             sync_auto
         ])
         .run(tauri::generate_context!())
+}
+
+/// Ask for permission to post notifications (Android 13+ and iOS), off the setup thread so the
+/// system prompt cannot block start-up. Reminders scheduled before the answer simply do not show.
+#[cfg(mobile)]
+fn request_notification_permission(app: &tauri::AppHandle) {
+    use tauri_plugin_notification::{NotificationExt, PermissionState};
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let n = app.notification();
+        if !matches!(n.permission_state(), Ok(PermissionState::Granted)) {
+            if let Err(e) = n.request_permission() {
+                tracing::warn!(error = %e, "notification permission request failed");
+            }
+        }
+    });
+}
+
+/// Mobile entry point. A phone app has no exit code, so a start-up failure is logged.
+#[cfg(mobile)]
+#[tauri::mobile_entry_point]
+pub fn mobile_main() {
+    if let Err(e) = run() {
+        tracing::error!(error = %e, "app failed to start");
+    }
 }
 
 #[cfg(test)]

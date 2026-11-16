@@ -273,6 +273,7 @@ export const api = {
   appInfo: () => invoke<AppInfo>("app_info"),
   openVault: (path: string) => invoke<VaultInfo>("open_vault", { path }),
   createVault: (path: string) => invoke<VaultInfo>("create_vault", { path }),
+  suggestedVault: () => invoke<string | null>("suggested_vault"),
   lastVault: () => invoke<string | null>("last_vault"),
   vaultInfo: () => invoke<VaultInfo>("vault_info"),
   tree: () => invoke<TreeNode>("tree"),

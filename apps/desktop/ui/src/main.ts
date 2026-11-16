@@ -614,6 +614,10 @@ async function showWelcome(): Promise<void> {
   if (last) {
     $("btn-recent").textContent = last;
     $<HTMLInputElement>("folder-path").value = last;
+  } else {
+    // Mobile: suggest a folder inside the app's own storage.
+    const suggested = await api.suggestedVault().catch(() => null);
+    if (suggested) $<HTMLInputElement>("folder-path").value = suggested;
   }
   $("folder-path").focus();
 }

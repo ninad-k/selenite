@@ -1096,16 +1096,16 @@ pub fn reminders_status(state: &AppState) -> RemindersStatus {
 
 // ---------------------------------------------------------------- workspace
 
-/// Base URL the UI uses for vault assets (served by the `vault` URI scheme). Windows webviews
-/// map custom schemes to `http://<scheme>.localhost/`.
-pub const ASSET_BASE: &str = if cfg!(windows) {
+/// Base URL the UI uses for vault assets (served by the `vault` URI scheme). Windows and Android
+/// webviews map custom schemes to `http://<scheme>.localhost/`.
+pub const ASSET_BASE: &str = if cfg!(any(windows, target_os = "android")) {
     "http://vault.localhost/"
 } else {
     "vault://localhost/"
 };
 
 /// Base URL of the `plugin` URI scheme that serves sandboxed plugin frames.
-pub const PLUGIN_BASE: &str = if cfg!(windows) {
+pub const PLUGIN_BASE: &str = if cfg!(any(windows, target_os = "android")) {
     "http://plugin.localhost/"
 } else {
     "plugin://localhost/"

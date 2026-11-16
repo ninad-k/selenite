@@ -3,7 +3,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use walkdir::WalkDir;
 
@@ -39,6 +39,23 @@ fn revision_of(meta: &fs::Metadata) -> (SystemTime, Revision) {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     (modified, Revision(format!("{nanos}-{}", meta.len())))
+}
+
+/// Make sure `file`'s mtime is strictly after `previous`.
+///
+/// Revisions are mtime + size. Two quick saves of equal length can land in the same clock tick
+/// (or the clock can step back), which would give the new content the old revision and let a
+/// stale conditional write through. Bumping the mtime just past the previous one rules that out
+/// for writes made through this provider. The 2 s step covers file systems with coarse
+/// timestamps (FAT).
+fn ensure_newer(file: &fs::File, previous: SystemTime) -> io::Result<()> {
+    for step in [Duration::from_millis(1), Duration::from_secs(2)] {
+        if file.metadata()?.modified()? > previous {
+            return Ok(());
+        }
+        file.set_modified(previous + step)?;
+    }
+    Ok(())
 }
 
 fn entry_from(path: &VaultPath, meta: &fs::Metadata) -> Entry {
@@ -212,14 +229,16 @@ impl StorageProvider for LocalFolder {
         // Re-check after creating directories (a link could have been created in between).
         self.safe_resolve(path)?;
 
-        match &mode {
+        let previous = match &mode {
             WriteMode::CreateNew => {
                 if fs::symlink_metadata(&full).is_ok() {
                     return Err(StorageError::AlreadyExists(path.clone()));
                 }
+                None
             }
             WriteMode::Replace(expected) => {
-                let actual = self.stat(path)?.map(|e| e.revision);
+                let current = self.stat(path)?;
+                let actual = current.as_ref().map(|e| e.revision.clone());
                 if actual.as_ref() != Some(expected) {
                     return Err(StorageError::Conflict {
                         path: path.clone(),
@@ -227,15 +246,19 @@ impl StorageProvider for LocalFolder {
                         actual,
                     });
                 }
+                current
             }
-            WriteMode::Overwrite => {}
-        }
+            WriteMode::Overwrite => self.stat(path)?,
+        };
 
         let mut tmp = tempfile::Builder::new()
             .prefix(TMP_PREFIX)
             .tempfile_in(parent)
             .map_err(ioe)?;
         tmp.write_all(data).map_err(ioe)?;
+        if let Some(prev) = &previous {
+            ensure_newer(tmp.as_file(), prev.modified).map_err(ioe)?;
+        }
         tmp.as_file().sync_all().map_err(ioe)?;
 
         let file = if matches!(mode, WriteMode::CreateNew) {
@@ -340,6 +363,64 @@ mod tests {
             LocalFolder::open(&file),
             Err(StorageError::InvalidPath(_))
         ));
+    }
+
+    #[test]
+    fn rapid_same_size_writes_always_get_a_new_revision() {
+        // Revisions are mtime + size; quick equal-length saves can share a clock tick, which
+        // would let a stale `Replace` through. Each write must still produce a new revision.
+        let (_d, s) = setup();
+        let path = p("Note.md");
+        let mut rev = s
+            .write(&path, b"v0\n", WriteMode::CreateNew)
+            .unwrap()
+            .revision;
+        for i in 1..=50 {
+            let data = format!("v{}\n", i % 10);
+            let next = s
+                .write(&path, data.as_bytes(), WriteMode::Replace(rev.clone()))
+                .unwrap()
+                .revision;
+            assert_ne!(next, rev, "write {i} reused the previous revision");
+            assert!(matches!(
+                s.write(&path, b"xx\n", WriteMode::Replace(rev)),
+                Err(StorageError::Conflict { .. })
+            ));
+            rev = next;
+        }
+        let next = s
+            .write(&path, b"zz\n", WriteMode::Overwrite)
+            .unwrap()
+            .revision;
+        assert_ne!(next, rev, "overwrite reused the previous revision");
+    }
+
+    #[test]
+    fn a_write_never_leaves_the_mtime_at_or_before_the_previous_one() {
+        // Simulates a coarse clock (two saves in one tick) or a clock that stepped back: the
+        // existing file's mtime is ahead of "now" when the next write happens.
+        let (d, s) = setup();
+        let path = p("Note.md");
+        s.write(&path, b"v1\n", WriteMode::CreateNew).unwrap();
+        let ahead = SystemTime::now() + std::time::Duration::from_secs(10);
+        fs::File::options()
+            .write(true)
+            .open(d.path().join("Note.md"))
+            .unwrap()
+            .set_modified(ahead)
+            .unwrap();
+        let before = s.stat(&path).unwrap().unwrap();
+        assert_eq!(before.modified, ahead);
+        for mode in [
+            WriteMode::Replace(before.revision.clone()),
+            WriteMode::Overwrite,
+        ] {
+            let prev = s.stat(&path).unwrap().unwrap();
+            let after = s.write(&path, b"v2\n", mode).unwrap();
+            assert!(after.modified > prev.modified, "mtime did not move forward");
+            assert_ne!(after.revision, prev.revision);
+            assert_eq!(s.stat(&path).unwrap().unwrap().revision, after.revision);
+        }
     }
 
     #[test]
